@@ -34,7 +34,7 @@ namespace RaftMovableStorage
     [BepInPlugin(Guid, "Movable Storages", "1.2.0")]
     public class Plugin : BaseUnityPlugin
     {
-        public const string Guid = "com.cyace.raftmovablestorage";
+        public const string Guid = "com.cyace84.raftmovablestorage";
 
         public static ConfigEntry<KeyboardShortcut> MoveKey;
         public static ManualLogSource Log;

@@ -17,7 +17,7 @@ No more emptying a chest into your hands just to nudge it one tile over.
 Look at a storage and press the move key (default `M`). The chest lifts into placement mode and a
 ghost tracks your aim. Left-click to place it. Right-click, or press the key again, to cancel.
 
-Change the key in `BepInEx/config/com.cyace.raftmovablestorage.cfg`.
+Change the key in `BepInEx/config/com.cyace84.raftmovablestorage.cfg`.
 
 ## Multiplayer
 
