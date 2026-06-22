@@ -73,7 +73,7 @@ namespace RaftMovableStorage
             go.hideFlags = HideFlags.HideAndDontSave;
             go.AddComponent<Ticker>();
 
-            Note($"Movable Storages 1.2.0 loaded. Move key = {MoveKey.Value}.");
+            Note($"{Info.Metadata.Name} {Info.Metadata.Version} loaded. Move key = {MoveKey.Value}.");
         }
 
         // Info = user-facing milestones; Trace = diagnostic non-events (missed raycast, bad spot).
@@ -85,7 +85,7 @@ namespace RaftMovableStorage
         {
             if (_awaitingClientChest) PollClientChest();
 
-            if (MoveKey.Value.IsDown() || Input.GetKeyDown(KeyCode.M))
+            if (MoveKey.Value.IsDown())
             {
                 if (moving != null) { Trace("hotkey: cancel carry."); CancelMove(); }
                 else TryBeginMove();
