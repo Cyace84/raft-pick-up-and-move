@@ -24,12 +24,14 @@ namespace RaftMovableStorage
     //   Storage_Small : Block          GetInventoryReference() : Inventory
     //   Inventory.GetRGDSlots() : RGD_Slot[]   /   Inventory.SetSlotsFromRGD(RGD_Slot[])
     //   BlockCreator.SetBlockTypeToBuild(Item_Base)  -> shows ghost (selectedBlock follows cursor)
-    //   BlockCreator.CreateBlock(item, localPos, localRot, dps, -1, false, 0,0,0)  (self-fills indices,
-    //       calls OnFinishedPlacement() synchronously so the new storage's inventory exists on return)
+    //   BlockCreator.CreateBlockCheat(item, pos, rot, dps, -1)  (host: mints authoritative indices,
+    //       RPCs Message_BlockCreator_PlaceBlock to all clients, fills inventory synchronously)
     //   BlockCreator.RemoveBlockNetwork(block, player, updateRaftBounds)  (static, networked)
     //
-    // SCOPE: host / single-player. Multiplayer needs a networked place (Message_BlockCreator_PlaceBlock)
-    // plus storage-content sync; CreateBlock(replicating:false) + SetSlotsFromRGD are local-only. TODO.
+    // SCOPE: single-player + multiplayer (host AND client), all live-verified. Host places via
+    // CreateBlockCheat; a client SendP2P's a vanilla place-request to the host and polls the
+    // replicated chest to sync contents (see ConfirmMove / PollClientChest). Contents travel via
+    // the vanilla Message_Storage_Close path. Only the player moving a chest needs the mod.
 
     [BepInPlugin(Guid, "Movable Storages", "1.2.0")]
     public class Plugin : BaseUnityPlugin
