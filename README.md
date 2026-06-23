@@ -37,3 +37,7 @@ DOTNET_ROOT=$HOME/.dotnet dotnet build -c Release
 ```
 
 The DLL ends up in `bin/Release/`. Copy it to `Raft/BepInEx/plugins/`.
+
+## License
+
+[MIT](LICENSE).
