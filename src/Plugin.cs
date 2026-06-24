@@ -33,7 +33,7 @@ namespace RaftMovableStorage
     // replicated chest to sync contents (see ConfirmMove / PollClientChest). Contents travel via
     // the vanilla Message_Storage_Close path. Only the player moving a chest needs the mod.
 
-    [BepInPlugin(Guid, "Movable Storages", "1.2.0")]
+    [BepInPlugin(Guid, "Movable Storages", "1.2.7")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.cyace84.raftmovablestorage";
@@ -57,6 +57,19 @@ namespace RaftMovableStorage
         private static Vector3 _syncPos;
         private static int _syncDeadlineFrame;
         private static readonly HashSet<uint> _preExisting = new HashSet<uint>();
+        // the original kept ALIVE (only hidden) on the client until the replicated chest is confirmed
+        // STABLE; removed only then, restored on failure/timeout -> never lost (DATA-LOSS FIX)
+        private static Storage_Small _pendingClientOriginal;
+        // HOST place-first verify: nb is created but the original is removed ONLY once nb settles to
+        // IsStable() over a few physics steps (the same-frame check reads stale - see DIAG). The
+        // original stays hidden until then, so a never-settling spot is undone with nothing lost.
+        private static bool _hostVerifying;
+        private static Storage_Small _hostNb;
+        private static Block _hostOriginal;
+        private static RGD_Slot[] _hostSlots;
+        private static int _hostVerifyStart;
+        private static int _hostVerifyDeadline;
+        private static int _hostLastLoggedStable; // -1 unknown, 0 false, 1 true (log only on change)
 
         private void Awake()
         {
@@ -86,6 +99,7 @@ namespace RaftMovableStorage
         internal static void Tick()
         {
             if (_awaitingClientChest) PollClientChest();
+            if (_hostVerifying) { PollHostVerify(); return; }
 
             if (MoveKey.Value.IsDown())
             {
@@ -167,6 +181,25 @@ namespace RaftMovableStorage
             _hiddenRenderers.Clear();
         }
 
+        // Clear carry state + leave build mode. The original is already removed by the time we call
+        // this, so there is nothing to restore.
+        private static void ClearCarry()
+        {
+            moving = null;
+            movingItem = null;
+            movingSlots = null;
+            ExitBuildMode();
+        }
+
+        // Abort WITHOUT data loss: in place-first order the original is never removed until the new
+        // chest is confirmed stable, so on any failure we just un-hide the original (still there),
+        // leave build mode and clear carry state.
+        private static void AbortKeepOriginal()
+        {
+            RestoreHidden();
+            ClearCarry();
+        }
+
         // Fully leave build mode so the player can't keep placing extra copies (BUG3).
         private static void ExitBuildMode()
         {
@@ -188,93 +221,163 @@ namespace RaftMovableStorage
             var pos = ghost.transform.localPosition;
             var rot = ghost.transform.localEulerAngles;
             var item = movingItem;
-            var dps = movingDps;
+            // CRITICAL: use the GHOST's surface-matched DPS (Wall/Floor/Ceiling), NOT the original's
+            // stored dps. settings_buildable.GetBlockPrefab(dpsType) picks a DIFFERENT prefab per
+            // surface (Placeable_Storage_*_Wall has a holder + a wall-facing stability gizmo;
+            // *_Floor's gizmo points down). Rebuilding the floor variant on a wall => no holder and a
+            // gizmo that never finds support => IsStable() false forever. The ghost already resolved
+            // the correct variant (that's why ghostStable=True), so mirror it.
+            var dps = ghost.dpsType;
             var slots = movingSlots;
             var original = moving;
             var player = ComponentManager<Network_Player>.Value;
+            if (player == null) { Trace("place: no local player."); return; }
 
-            // The original is about to be destroyed; drop the hide-bookkeeping (nothing to restore).
-            _hiddenColliders.Clear();
-            _hiddenRenderers.Clear();
-            // DUPE/REFUND FIX: RemoveBlockCoroutine only refunds (chest item, contents, OR — when
-            // itemToReturnOnDestroy is null — 50% of the recipe materials) inside a branch gated on
-            // `playerRemovingBlock != null`. Passing NULL skips that branch entirely: no item, no
-            // recipe, no contents. DestroyBlock/RemoveUnstableBlockNetworked are null-safe and
-            // DestroyImmediate runs unconditionally, so the block is still removed. (Decompile-
-            // verified; contents already captured into `slots`.)
-            BlockCreator.RemoveBlockNetwork(original, null, true);
-
+            // PLACE-FIRST + STABILITY GATE (the real fix). Create the new chest while the original is
+            // still present but with its colliders DISABLED (hidden during carry) - so the new chest's
+            // stability gizmos judge it WITHOUT the original, exactly the post-removal situation.
+            // DestroyBlock's cascade only takes blocks that are !IsStable() within the removed block's
+            // UnstableCheckDistance, so we remove the original ONLY once the new chest is confirmed
+            // stable on its own; a stable block can't be cascaded. If the spot is unsupported (a wall
+            // with no holder, an edge, clipping) the new chest is !IsStable() -> we discard it and KEEP
+            // the original, so nothing is ever lost. (This was the user's big-chest-on-a-wall loss.)
             if (Raft_Network.IsHost)
             {
-                // HOST fast-path: CreateBlockCheat mints authoritative unique indices and RPCs a
-                // Message_BlockCreator_PlaceBlock to all clients (plain CreateBlock(...,0,0,0) is
-                // local-only — remotes just saw the original vanish). Then push contents via the
-                // vanilla Message_Storage_Close (its ctor grabs GetRGDSlots, receiver SetSlotsFromRGD).
-                var nb = bc.CreateBlockCheat(item, pos, rot, dps, -1);
-                if (nb is Storage_Small ns && slots != null)
+                Block nb;
+                try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
+                catch (System.Exception ex)
                 {
-                    ns.GetInventoryReference()?.SetSlotsFromRGD(slots);
-                    if (player?.Network != null && player.StorageManager != null)
-                    {
-                        try
-                        {
-                            var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
-                            player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
-                        }
-                        catch (System.Exception ex) { Log?.LogWarning("host content-sync RPC failed: " + ex.Message); }
-                    }
-                    Note($"placed '{item.UniqueName}' at {pos}; restored {slots.Length} slots (host, networked).");
+                    Log?.LogWarning("place failed (CreateBlockCheat threw): " + ex.Message + "; chest left where it was.");
+                    AbortKeepOriginal();
+                    return;
                 }
-                else
+
+                if (!(nb is Storage_Small ns))
                 {
-                    Log?.LogWarning($"placed '{item?.UniqueName}' but new block is not Storage_Small (nb={(nb == null ? "null" : nb.GetType().Name)}).");
+                    if (nb != null) { try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { } }
+                    Log?.LogWarning($"place produced no storage (nb={(nb == null ? "null" : nb.GetType().Name)}); chest left where it was.");
+                    AbortKeepOriginal();
+                    return;
                 }
+
+                // place-first + DEFERRED stability gate: nb exists, but the original stays hidden
+                // until nb settles to IsStable() over a few physics steps (same-frame reads stale -
+                // SyncTransforms wasn't enough; OverlapBox needs real FixedUpdate steps). No removal
+                // happens yet, so no cascade yet. PollHostVerify finishes the swap or undoes it.
+                _hostNb = ns;
+                _hostOriginal = original;
+                _hostSlots = slots;
+                _hostVerifyStart = Time.frameCount;
+                _hostVerifyDeadline = Time.frameCount + 120; // ~2s @60fps for physics to settle
+                _hostLastLoggedStable = -1;
+                _hostVerifying = true;
+                Trace($"placing nb@{ns.transform.localPosition.ToString("F2")}; verifying support...");
+
+                // leave build mode but KEEP hidden bookkeeping + pending fields for the poll
+                moving = null;
+                movingItem = null;
+                movingSlots = null;
+                ExitBuildMode();
             }
             else
             {
-                // CLIENT path: a client can't mint authoritative indices, so it does what vanilla
-                // co-op building does — SendP2P a place REQUEST to the host (0 indices). The host
-                // creates the chest authoritatively and replicates it back to everyone, including us.
-                // We don't know the new ObjectIndex yet, so we snapshot existing storages and poll
-                // (PollClientChest) for the new one near `pos`, then push its contents.
-                if (player?.Network == null) { Log?.LogWarning("client move: no Network_Player/Network."); }
-                else
-                {
-                    _preExisting.Clear();
-                    if (StorageManager.allStorages != null)
-                        foreach (var s in StorageManager.allStorages)
-                            if (s != null) _preExisting.Add(s.ObjectIndex);
+                // CLIENT: can't create authoritatively, so KEEP the original (hidden) as a safety net,
+                // ask the host to place the new chest, and in PollClientChest remove the original ONLY
+                // once the replicated chest is confirmed stable. Unstable/timeout -> restore original.
+                if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
 
-                    var req = new Message_BlockCreator_PlaceBlock(
-                        Messages.BlockCreator_PlaceBlock, bc, item.UniqueIndex,
-                        0u, 0u, 0u, pos, rot, -1, dps);
-                    player.SendP2P(req, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                _preExisting.Clear();
+                if (StorageManager.allStorages != null)
+                    foreach (var s in StorageManager.allStorages)
+                        if (s != null) _preExisting.Add(s.ObjectIndex);
 
-                    _syncSlots = slots;
-                    _syncPos = pos;
-                    _awaitingClientChest = slots != null;
-                    _syncDeadlineFrame = Time.frameCount + 600; // ~10s @60fps
-                    Note($"client: asked host to place '{item.UniqueName}'; awaiting chest to sync {slots?.Length ?? 0} slots.");
-                }
+                var req = new Message_BlockCreator_PlaceBlock(
+                    Messages.BlockCreator_PlaceBlock, bc, item.UniqueIndex,
+                    0u, 0u, 0u, pos, rot, -1, dps);
+                player.SendP2P(req, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+
+                _syncSlots = slots;
+                _syncPos = pos;
+                _pendingClientOriginal = original;        // removed ONLY after the new chest is confirmed stable
+                _awaitingClientChest = true;
+                _syncDeadlineFrame = Time.frameCount + 600; // ~10s @60fps
+                Note($"client: asked host to place '{item.UniqueName}'; original kept until the moved chest is confirmed.");
+
+                // leave build mode but KEEP hidden bookkeeping + pending original for the poll
+                moving = null;
+                movingItem = null;
+                movingSlots = null;
+                ExitBuildMode();
             }
-
-            // clear state WITHOUT re-activating the (now removed) original, and exit build mode (BUG3)
-            moving = null;
-            movingItem = null;
-            movingSlots = null;
-            ExitBuildMode();
         }
 
         // CLIENT content-sync: after we asked the host to place the chest, watch StorageManager for
         // the new storage (object index not in our pre-place snapshot) nearest the placed spot, then
         // push our carried contents to the host via the vanilla Message_Storage_Close path and apply
         // them to our own view. Times out so we never poll forever.
+        // HOST place-first verify: wait for the freshly-placed chest to settle to IsStable() (the
+        // same-frame check reads stale - see DIAG), then remove the original. A genuinely unsupported
+        // spot never settles -> we undo (discard nb, restore original), losing nothing.
+        private static void PollHostVerify()
+        {
+            if (_hostNb == null)
+            {
+                RestoreHidden();
+                _hostVerifying = false; _hostOriginal = null; _hostSlots = null;
+                Log?.LogWarning("host verify: placed chest vanished before settling; original restored, nothing lost.");
+                return;
+            }
+
+            int delta = Time.frameCount - _hostVerifyStart;
+            bool stable = false;
+            try { stable = _hostNb.IsStable(); } catch { }
+
+            int sv = stable ? 1 : 0;
+            if (sv != _hostLastLoggedStable) { Trace($"settle: frame+{delta} nbStable={stable}"); _hostLastLoggedStable = sv; }
+
+            if (stable)
+            {
+                var ns = _hostNb;
+                var original = _hostOriginal;
+                var slots = _hostSlots;
+                var player = ComponentManager<Network_Player>.Value;
+
+                if (slots != null) ns.GetInventoryReference()?.SetSlotsFromRGD(slots);
+                _hiddenColliders.Clear();
+                _hiddenRenderers.Clear();
+                if (original != null) { try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
+
+                if (slots != null && player?.Network != null && player.StorageManager != null)
+                {
+                    try
+                    {
+                        var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
+                        player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                    }
+                    catch (System.Exception ex) { Log?.LogWarning("host content-sync RPC failed: " + ex.Message); }
+                }
+                Note($"placed at {ns.transform.localPosition.ToString("F2")}; restored {slots?.Length ?? 0} slots after settling (+{delta}f, host).");
+                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null;
+                return;
+            }
+
+            if (Time.frameCount > _hostVerifyDeadline)
+            {
+                try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
+                RestoreHidden();
+                Note("can't place there - it never became supported (+" + delta + "f). Chest left where it was.");
+                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null;
+            }
+        }
+
         private static void PollClientChest()
         {
             if (Time.frameCount > _syncDeadlineFrame)
             {
-                _awaitingClientChest = false; _syncSlots = null;
-                Log?.LogWarning("client sync: timed out waiting for the host to spawn the moved chest.");
+                // host never spawned the chest -> un-hide the original we kept; nothing lost
+                RestoreHidden();
+                _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null;
+                Log?.LogWarning("client sync: host didn't place the chest in time; original restored, nothing lost.");
                 return;
             }
             if (StorageManager.allStorages == null) return;
@@ -290,9 +393,20 @@ namespace RaftMovableStorage
             if (best == null) return; // host's reply hasn't spawned it yet
 
             var player = ComponentManager<Network_Player>.Value;
-            if (player?.Network == null) { _awaitingClientChest = false; _syncSlots = null; return; }
+            if (player?.Network == null) { RestoreHidden(); _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null; return; }
 
-            best.GetInventoryReference()?.SetSlotsFromRGD(_syncSlots); // our local view
+            if (!best.IsStable())
+            {
+                // unsupported spot: the chest would be cascaded when we remove the original, so
+                // discard it and keep the original instead. Nothing lost.
+                try { BlockCreator.RemoveBlockNetwork(best, null, true); } catch { }
+                RestoreHidden();
+                _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null;
+                Note("client: that spot wouldn't be supported; chest left where it was.");
+                return;
+            }
+
+            if (_syncSlots != null) best.GetInventoryReference()?.SetSlotsFromRGD(_syncSlots); // our local view
             try
             {
                 if (player.StorageManager != null)
@@ -304,6 +418,14 @@ namespace RaftMovableStorage
             }
             catch (System.Exception ex) { Log?.LogWarning("client sync RPC failed: " + ex.Message); }
 
+            // stable + filled -> NOW it is safe to delete the original we kept hidden
+            _hiddenColliders.Clear();
+            _hiddenRenderers.Clear();
+            if (_pendingClientOriginal != null)
+            {
+                try { BlockCreator.RemoveBlockNetwork(_pendingClientOriginal, null, true); } catch { }
+                _pendingClientOriginal = null;
+            }
             _awaitingClientChest = false; _syncSlots = null;
         }
     }
