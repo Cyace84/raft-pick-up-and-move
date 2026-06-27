@@ -33,7 +33,7 @@ namespace RaftMovableStorage
     // replicated chest to sync contents (see ConfirmMove / PollClientChest). Contents travel via
     // the vanilla Message_Storage_Close path. Only the player moving a chest needs the mod.
 
-    [BepInPlugin(Guid, "Movable Storages", "1.2.7")]
+    [BepInPlugin(Guid, "Movable Storages", "1.3.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.cyace84.raftmovablestorage";
@@ -46,6 +46,19 @@ namespace RaftMovableStorage
         internal static Item_Base movingItem;
         internal static DPS movingDps;
         internal static RGD_Slot[] movingSlots;
+        // paint carried with the chest (SO_ColorValue refs + pattern indices); see Paint/CapturePaint
+        private static Paint movingPaint;
+
+        // A block's full paint state: per-side base + pattern colours and pattern indices. These are
+        // plain Block instance fields (currentColorA/B, currentPatternColorA/B, currentPatternIndexN);
+        // CreateBlockCheat makes a fresh unpainted block, so we snapshot them and re-apply after the
+        // new chest settles. (Bug: paint a chest, move it, it reverted to default.)
+        private struct Paint
+        {
+            public SO_ColorValue cA, cB, pcA, pcB;
+            public uint pi1, pi2;
+            public bool Any => cA != null || cB != null || pcA != null || pcB != null;
+        }
         // renderers/colliders we disabled to hide the original while carrying (restored on cancel)
         private static readonly List<Collider> _hiddenColliders = new List<Collider>();
         private static readonly List<Renderer> _hiddenRenderers = new List<Renderer>();
@@ -55,6 +68,7 @@ namespace RaftMovableStorage
         private static bool _awaitingClientChest;
         private static RGD_Slot[] _syncSlots;
         private static Vector3 _syncPos;
+        private static Paint _syncPaint;
         private static int _syncDeadlineFrame;
         private static readonly HashSet<uint> _preExisting = new HashSet<uint>();
         // the original kept ALIVE (only hidden) on the client until the replicated chest is confirmed
@@ -70,6 +84,7 @@ namespace RaftMovableStorage
         private static int _hostVerifyStart;
         private static int _hostVerifyDeadline;
         private static int _hostLastLoggedStable; // -1 unknown, 0 false, 1 true (log only on change)
+        private static Paint _hostPaint;
 
         private void Awake()
         {
@@ -141,6 +156,7 @@ namespace RaftMovableStorage
             movingSlots = inv != null ? inv.GetRGDSlots() : null;
             movingItem = storage.buildableItem;
             movingDps = storage.dpsType;
+            movingPaint = CapturePaint(storage);
             moving = storage;
 
             // BUG1: hide the original while carrying so its mesh+collider don't block placing the
@@ -179,6 +195,49 @@ namespace RaftMovableStorage
             foreach (var r in _hiddenRenderers) if (r != null) r.enabled = true;
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
+        }
+
+        private static Paint CapturePaint(Block b) => new Paint
+        {
+            cA = b.currentColorA, cB = b.currentColorB,
+            pcA = b.currentPatternColorA, pcB = b.currentPatternColorB,
+            pi1 = b.currentPatternIndex1, pi2 = b.currentPatternIndex2,
+        };
+
+        // Re-apply captured paint to the freshly-placed chest: locally via SetInstanceColorAndPattern
+        // (sets both the Block fields - so it persists through save/load - and the material property
+        // block, so it shows), and over the network via the vanilla Message_PaintBlock so connected
+        // peers recolour their replica. Host RPCs to Other; a client SendP2P's to the host (which
+        // re-broadcasts), mirroring PaintBrush. A side is networked only when both its colours are
+        // non-null (Message_PaintBlock's ctor reads color.uniqueColorIndex and would NPE on null).
+        private static void ApplyPaint(Block nb, Paint p, Network_Player player)
+        {
+            if (nb == null || !p.Any) return;
+            try
+            {
+                nb.SetInstanceColorAndPattern(p.cA, p.pcA, 1, p.pi1);
+                nb.SetInstanceColorAndPattern(p.cB, p.pcB, 2, p.pi2);
+            }
+            catch (System.Exception ex) { Log?.LogWarning("paint apply failed: " + ex.Message); }
+
+            if (player?.Network == null) return;
+            var pos = nb.transform.localPosition;
+            try
+            {
+                if (p.cA != null && p.pcA != null) SendPaint(player, nb.ObjectIndex, pos, p.cA, p.pcA, 1, p.pi1);
+                if (p.cB != null && p.pcB != null) SendPaint(player, nb.ObjectIndex, pos, p.cB, p.pcB, 2, p.pi2);
+            }
+            catch (System.Exception ex) { Log?.LogWarning("paint network failed: " + ex.Message); }
+        }
+
+        private static void SendPaint(Network_Player player, uint boi, Vector3 pos,
+            SO_ColorValue color, SO_ColorValue patternColor, int side, uint patternIndex)
+        {
+            var msg = new Message_PaintBlock(Messages.PaintBlock, player, boi, pos, color, patternColor, side, patternIndex);
+            if (Raft_Network.IsHost)
+                player.Network.RPC(msg, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+            else
+                player.SendP2P(msg, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
         }
 
         // Clear carry state + leave build mode. The original is already removed by the time we call
@@ -267,6 +326,7 @@ namespace RaftMovableStorage
                 _hostNb = ns;
                 _hostOriginal = original;
                 _hostSlots = slots;
+                _hostPaint = movingPaint;
                 _hostVerifyStart = Time.frameCount;
                 _hostVerifyDeadline = Time.frameCount + 120; // ~2s @60fps for physics to settle
                 _hostLastLoggedStable = -1;
@@ -298,6 +358,7 @@ namespace RaftMovableStorage
 
                 _syncSlots = slots;
                 _syncPos = pos;
+                _syncPaint = movingPaint;
                 _pendingClientOriginal = original;        // removed ONLY after the new chest is confirmed stable
                 _awaitingClientChest = true;
                 _syncDeadlineFrame = Time.frameCount + 600; // ~10s @60fps
@@ -343,6 +404,7 @@ namespace RaftMovableStorage
                 var player = ComponentManager<Network_Player>.Value;
 
                 if (slots != null) ns.GetInventoryReference()?.SetSlotsFromRGD(slots);
+                ApplyPaint(ns, _hostPaint, player);
                 _hiddenColliders.Clear();
                 _hiddenRenderers.Clear();
                 if (original != null) { try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
@@ -407,6 +469,7 @@ namespace RaftMovableStorage
             }
 
             if (_syncSlots != null) best.GetInventoryReference()?.SetSlotsFromRGD(_syncSlots); // our local view
+            ApplyPaint(best, _syncPaint, player);
             try
             {
                 if (player.StorageManager != null)
