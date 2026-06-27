@@ -33,7 +33,7 @@ namespace RaftMovableStorage
     // replicated chest to sync contents (see ConfirmMove / PollClientChest). Contents travel via
     // the vanilla Message_Storage_Close path. Only the player moving a chest needs the mod.
 
-    [BepInPlugin(Guid, "Movable Storages", "1.3.0")]
+    [BepInPlugin(Guid, "Movable Storages", "1.0.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.cyace84.raftmovablestorage";
