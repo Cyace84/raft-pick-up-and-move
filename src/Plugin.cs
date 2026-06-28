@@ -46,13 +46,21 @@ namespace RaftMovableStorage
         public static ConfigEntry<KeyboardShortcut> MoveKey;
         public static ManualLogSource Log;
 
-        // carry-mode state
-        internal static Storage_Small moving;
+        // carry-mode state. `moving` is the block being carried (any Placeable block, not just storage).
+        internal static Block moving;
         internal static Item_Base movingItem;
         internal static DPS movingDps;
         internal static RGD_Slot[] movingSlots;
         // paint carried with the chest (SO_ColorValue refs + pattern indices); see Paint/CapturePaint
         private static Paint movingPaint;
+        // deep per-type state carried beyond paint/contents: sign/plaque text (null unless the block
+        // is a TextWriterObject). Restored via the game's own networked setter so it survives + syncs.
+        private static string movingText;
+        // the block's full save snapshot, captured at pickup. Many device RGD subtypes override
+        // RestoreBlock (purifier tank+battery, cooking progress, fuel tank, wind turbine) - calling it
+        // on the recreated block re-applies that state for FREE (the game's own load path). Null/base
+        // = just paint+health.
+        private static RGD_Block movingRgd;
 
         // A block's full paint state: per-side base + pattern colours and pattern indices. These are
         // plain Block instance fields (currentColorA/B, currentPatternColorA/B, currentPatternIndexN);
@@ -83,9 +91,11 @@ namespace RaftMovableStorage
         // IsStable() over a few physics steps (the same-frame check reads stale - see DIAG). The
         // original stays hidden until then, so a never-settling spot is undone with nothing lost.
         private static bool _hostVerifying;
-        private static Storage_Small _hostNb;
+        private static Block _hostNb;
         private static Block _hostOriginal;
         private static RGD_Slot[] _hostSlots;
+        private static string _hostText;
+        private static RGD_Block _hostRgd;
         private static int _hostVerifyStart;
         private static int _hostVerifyDeadline;
         private static int _hostLastLoggedStable; // -1 unknown, 0 false, 1 true (log only on change)
@@ -125,7 +135,16 @@ namespace RaftMovableStorage
         public static void __MonoLabUnload()
         {
             try { Harmony.UnpatchID(Guid); } catch { }
-            try { if (_tickerGo != null) UnityEngine.Object.Destroy(_tickerGo); } catch { }
+            // Destroy EVERY ticker we (or an older hot-reloaded copy) ever spawned. The ticker is
+            // HideAndDontSave, which FindObjectsOfType misses - Resources.FindObjectsOfTypeAll sees it.
+            // Without this, stacked reloads leave multiple tickers, each with its own `moving` static,
+            // fighting over the hotkey (the cause of flaky cancel). Belt-and-suspenders over _tickerGo.
+            try
+            {
+                foreach (var go in Resources.FindObjectsOfTypeAll<GameObject>())
+                    if (go != null && go.name == "RMS_Ticker") UnityEngine.Object.Destroy(go);
+            }
+            catch { }
             _tickerGo = null;
             moving = null; movingItem = null; movingSlots = null;
             _hostVerifying = false; _awaitingClientChest = false;
@@ -143,7 +162,7 @@ namespace RaftMovableStorage
 
             if (MoveKey.Value.IsDown())
             {
-                if (moving != null) { Trace("hotkey: cancel carry."); CancelMove(); }
+                if (moving != null) CancelMove();
                 else TryBeginMove();
                 return;
             }
@@ -171,18 +190,43 @@ namespace RaftMovableStorage
                     out var hit, Player.UseDistance * 2f, LayerMasks.MASK_Block))
             { Trace("begin: raycast hit nothing on MASK_Block."); return; }
 
-            var storage = hit.collider.GetComponentInParent<Storage_Small>();
-            if (storage == null)
-            { Trace($"begin: hit '{hit.collider.name}' but no Storage_Small in parents."); return; }
-            if (storage.buildableItem == null)
-            { Trace("begin: storage has null buildableItem."); return; }
+            var block = hit.collider.GetComponentInParent<Block>();
+            if (block == null)
+            { Trace($"begin: hit '{hit.collider.name}' but no Block in parents."); return; }
+            if (block.buildableItem == null)
+            { Trace("begin: block has null buildableItem."); return; }
 
-            var inv = storage.GetInventoryReference();
-            movingSlots = inv != null ? inv.GetRGDSlots() : null;
-            movingItem = storage.buildableItem;
-            movingDps = storage.dpsType;
-            movingPaint = CapturePaint(storage);
-            moving = storage;
+            // WHITELIST: only crafted PLACEABLE objects (devices/decor/storage), never the structural
+            // raft skeleton (foundations/walls/floors/pillars/pipes). settings_buildable.Placeable is
+            // the game's own flag separating placed objects from structure (verified: ItemInstance_
+            // Buildable.Placeable => placeable). One check, no hardcoded type list.
+            var sb = block.buildableItem.settings_buildable;
+            if (sb == null || !sb.Placeable)
+            { Trace($"begin: '{block.buildableItem.UniqueName}' is structure (not Placeable) - not movable."); return; }
+
+            // SAFE GATE (never lose state): we recreate the block fresh, so any deep device state we
+            // don't explicitly carry (desalinator water, blender contents, battery charge, planter
+            // crop, cooking progress) would be lost. Only carry blocks we FULLY preserve - storages
+            // (slots) and signs (text) - or provably stateless decor. Everything else is refused, not
+            // eaten. Verified: each stateful device has its own RGD subtype / networked behaviour.
+            if (HasUnhandledState(block))
+            { Note($"Can't move '{block.buildableItem.UniqueName}' yet - it has contents/state this version would lose. Not moved."); return; }
+
+            // NOTE: no "dependents on top" gate. An OverlapBox-above heuristic wrongly refused normal
+            // blocks (stacked chests, a chest under a shelf or the next floor) because a block ABOVE
+            // isn't necessarily SUPPORTED BY this one. Known limitation: moving a surface with loose
+            // decor on it (a table) can drop that decor. Revisit with a real support-graph query.
+
+            // storage contents: only storages carry an inventory; other placeables carry no slots.
+            movingSlots = (block is Storage_Small storage && storage.GetInventoryReference() != null)
+                ? storage.GetInventoryReference().GetRGDSlots() : null;
+            movingItem = block.buildableItem;
+            movingDps = block.dpsType;
+            movingPaint = CapturePaint(block);
+            movingText = TryGetSignText(block);
+            movingRgd = TryCaptureRgd(block);
+            moving = block;
+            ClearHintIfShown(); // leaving idle -> drop our hint; build-mode UI takes over
 
             // BUG1: hide the original while carrying so its mesh+collider don't block placing the
             // ghost on/near its own spot. NOTE: do NOT SetActive(false) the GameObject — that
@@ -190,9 +234,9 @@ namespace RaftMovableStorage
             // it caused the duplicate). Disabling only Renderers+Colliders keeps registration intact.
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
-            foreach (var c in storage.GetComponentsInChildren<Collider>())
+            foreach (var c in block.GetComponentsInChildren<Collider>())
                 if (c.enabled) { c.enabled = false; _hiddenColliders.Add(c); }
-            foreach (var r in storage.GetComponentsInChildren<Renderer>())
+            foreach (var r in block.GetComponentsInChildren<Renderer>())
                 if (r.enabled) { r.enabled = false; _hiddenRenderers.Add(r); }
 
             // make sure the build creator is active so the ghost shows, then engage it
@@ -200,7 +244,7 @@ namespace RaftMovableStorage
             if (bc != null && !bc.gameObject.activeSelf) bc.gameObject.SetActive(true);
             bc?.SetBlockTypeToBuild(movingItem);
 
-            Note($"Carrying '{movingItem.UniqueName}' ({(movingSlots?.Length ?? 0)} slots). LMB to place.");
+            Note($"Carrying '{movingItem.UniqueName}'" + ((movingSlots?.Length ?? 0) > 0 ? $" ({movingSlots.Length} slots)" : "") + ". LMB to place.");
         }
 
         internal static void CancelMove()
@@ -212,6 +256,8 @@ namespace RaftMovableStorage
             moving = null;
             movingItem = null;
             movingSlots = null;
+            movingText = null;
+            movingRgd = null;
         }
 
         private static void RestoreHidden()
@@ -220,6 +266,125 @@ namespace RaftMovableStorage
             foreach (var r in _hiddenRenderers) if (r != null) r.enabled = true;
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
+        }
+
+        // Single source of truth for "can this block be moved right now" - used by both the in-world
+        // hint and TryBeginMove's gate, so the 'M Move' prompt appears EXACTLY on what will actually move.
+        private static bool IsMovable(Block b)
+        {
+            if (b == null || b.buildableItem == null) return false;
+            var sb = b.buildableItem.settings_buildable;
+            if (sb == null || !sb.Placeable) return false;
+            return !HasUnhandledState(b);
+        }
+
+        // In-world 'M Move' hint, driven every idle frame from the Ticker so it shows on ANY movable
+        // block (not just storage). Storages keep the Harmony postfix (stacks 'Move' under their own
+        // 'Open'); here we handle everything else and manage our own show/hide. Cached on the aimed
+        // block so we don't run Serialize_Save()/OverlapBox every frame.
+        private static bool _hintShown;
+        private static Block _hintLastBlock;
+        private static bool _hintLastMovable;
+        // Driven from Ticker.LateUpdate (NOT Update) so our ShowText runs AFTER the game's own pickup/
+        // remove prompt was set this frame - otherwise undefined Update order lets the game's prompt
+        // (clearAllTexts) wipe ours, or ours wipe theirs. LateUpdate guarantees we stack last.
+        internal static void LateTick()
+        {
+            if (moving != null || _hostVerifying || _awaitingClientChest) { ClearHintIfShown(); return; }
+            UpdateMoveHint();
+        }
+        private static void UpdateMoveHint()
+        {
+            if (CanvasHelper.ActiveMenu != MenuType.None) { ClearHintIfShown(); return; }
+            var cam = Camera.main;
+            if (cam == null) { ClearHintIfShown(); return; }
+            if (!Physics.Raycast(cam.transform.position, cam.transform.forward, out var hit, Player.UseDistance * 2f, LayerMasks.MASK_Block))
+            { ClearHintIfShown(); return; }
+            var block = hit.collider.GetComponentInParent<Block>();
+            if (block == null) { ClearHintIfShown(); return; }
+
+            bool movable;
+            if (block == _hintLastBlock) movable = _hintLastMovable;
+            else { movable = IsMovable(block); _hintLastBlock = block; _hintLastMovable = movable; }
+            if (!movable) { ClearHintIfShown(); return; }
+
+            // storages draw their own 'Open' + the postfix adds 'Move'; don't double-handle here
+            if (block is Storage_Small) { _hintShown = false; return; }
+
+            var dtm = ComponentManager<DisplayTextManager>.Value;
+            if (dtm == null) return;
+            // ADD our line at index 1 WITHOUT clearing - keeps the game's 'X' remove/pickup prompt at
+            // index 0 and stacks 'M Move' under it (same slot the storage postfix uses).
+            dtm.ShowText("Move", MoveKey.Value.MainKey, 1, 0, false);
+            _hintShown = true;
+        }
+        private static void ClearHintIfShown()
+        {
+            _hintLastBlock = null;
+            if (!_hintShown) return;
+            _hintShown = false;
+            // hide ONLY our line (index 1); never touch the game's prompts at index 0
+            try { ComponentManager<DisplayTextManager>.Value?.HideDisplayTexts(1); } catch { }
+        }
+
+        // Deep-state safety: true if the block holds device state we don't explicitly carry, so moving
+        // it (recreate-fresh) would lose it. Storage (slots) and sign (TextWriterObject text) are
+        // handled => safe. Otherwise a networked behaviour or a non-base block RGD means deep state.
+        private static bool HasUnhandledState(Block b)
+        {
+            if (b is Storage_Small) return false;                                    // slots handled
+            if (b.GetComponentInChildren<TextWriterObject>() != null) return false;   // sign text handled
+            try
+            {
+                var rgd = b.Serialize_Save();
+                if (rgd != null)
+                {
+                    var t = rgd.GetType();
+                    if (t != typeof(RGD_Block))
+                    {
+                        // a device RGD subtype. SAFE if it self-restores via a RestoreBlock override
+                        // (purifier/cooking/fueltank/windturbine) - we call rgd.RestoreBlock(newBlock).
+                        var m = t.GetMethod("RestoreBlock", new[] { typeof(Block) });
+                        if (m != null && m.DeclaringType != typeof(RGD_Block)) return false;
+                        return true;   // subtype w/o override (sprinkler/recycler/cropplot) => unhandled
+                    }
+                }
+                // base RGD_Block (or null): refuse only if it has an unhandled networked stateful
+                // sibling whose state we don't carry (e.g. a seat's occupancy component). Plain
+                // stateless decor passes.
+                if (b.networkType != NetworkType.None) return true;
+                if (b.networkedBehaviour != null || b.networkedIDBehaviour != null) return true;
+            }
+            catch { return true; }                                                   // unknown => refuse (safe)
+            return false;
+        }
+
+        // Full save snapshot of the block at pickup; null if it can't serialize. Used to re-apply
+        // self-restoring device state (purifier/cooking/fueltank/windturbine) on the recreated block.
+        private static RGD_Block TryCaptureRgd(Block b)
+        {
+            try { return b.Serialize_Save() as RGD_Block; } catch { return null; }
+        }
+
+        // Sign/plaque text (and any TextWriterObject-backed block). Null for everything else.
+        private static string TryGetSignText(Block b)
+        {
+            try { var tw = b.GetComponentInChildren<TextWriterObject>(); return tw != null ? tw.GetText() : null; }
+            catch { return null; }
+        }
+
+        // Re-apply carried text to the freshly-placed sign via the game's networked setter:
+        // SetTextNetworked sets locally AND propagates (host RPCs Other, a client P2Ps the host), so
+        // the moved sign keeps its text in single-player and multiplayer. (Vanilla X-remove loses it.)
+        private static void ApplySignText(Block nb, string text)
+        {
+            if (nb == null || string.IsNullOrEmpty(text)) return;
+            try
+            {
+                var tw = nb.GetComponentInChildren<TextWriterObject>();
+                if (tw != null) tw.SetTextNetworked(text);
+            }
+            catch (System.Exception ex) { Log?.LogWarning("sign text restore failed: " + ex.Message); }
         }
 
         private static Paint CapturePaint(Block b) => new Paint
@@ -272,6 +437,8 @@ namespace RaftMovableStorage
             moving = null;
             movingItem = null;
             movingSlots = null;
+            movingText = null;
+            movingRgd = null;
             ExitBuildMode();
         }
 
@@ -336,10 +503,9 @@ namespace RaftMovableStorage
                     return;
                 }
 
-                if (!(nb is Storage_Small ns))
+                if (nb == null)
                 {
-                    if (nb != null) { try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { } }
-                    Log?.LogWarning($"place produced no storage (nb={(nb == null ? "null" : nb.GetType().Name)}); chest left where it was.");
+                    Log?.LogWarning("place produced no block; original left where it was.");
                     AbortKeepOriginal();
                     return;
                 }
@@ -348,15 +514,17 @@ namespace RaftMovableStorage
                 // until nb settles to IsStable() over a few physics steps (same-frame reads stale -
                 // SyncTransforms wasn't enough; OverlapBox needs real FixedUpdate steps). No removal
                 // happens yet, so no cascade yet. PollHostVerify finishes the swap or undoes it.
-                _hostNb = ns;
+                _hostNb = nb;
                 _hostOriginal = original;
                 _hostSlots = slots;
+                _hostText = movingText;
+                _hostRgd = movingRgd;
                 _hostPaint = movingPaint;
                 _hostVerifyStart = Time.frameCount;
                 _hostVerifyDeadline = Time.frameCount + 120; // ~2s @60fps for physics to settle
                 _hostLastLoggedStable = -1;
                 _hostVerifying = true;
-                Trace($"placing nb@{ns.transform.localPosition.ToString("F2")}; verifying support...");
+                Trace($"placing nb@{nb.transform.localPosition.ToString("F2")}; verifying support...");
 
                 // leave build mode but KEEP hidden bookkeeping + pending fields for the poll
                 moving = null;
@@ -366,9 +534,15 @@ namespace RaftMovableStorage
             }
             else
             {
-                // CLIENT: can't create authoritatively, so KEEP the original (hidden) as a safety net,
-                // ask the host to place the new chest, and in PollClientChest remove the original ONLY
-                // once the replicated chest is confirmed stable. Unstable/timeout -> restore original.
+                // CLIENT: full support is storage-only for now - we locate the replicated block via
+                // StorageManager. Moving other placeables as a client isn't wired yet, so refuse rather
+                // than risk losing remote state. (Host AND single-player move everything.)
+                if (!(original is Storage_Small))
+                { Note($"moving '{item.UniqueName}' as a client isn't supported yet - host can move it, or move storages."); AbortKeepOriginal(); return; }
+
+                // can't create authoritatively, so KEEP the original (hidden) as a safety net, ask the
+                // host to place the new chest, and in PollClientChest remove the original ONLY once the
+                // replicated chest is confirmed stable. Unstable/timeout -> restore original.
                 if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
 
                 _preExisting.Clear();
@@ -384,7 +558,7 @@ namespace RaftMovableStorage
                 _syncSlots = slots;
                 _syncPos = pos;
                 _syncPaint = movingPaint;
-                _pendingClientOriginal = original;        // removed ONLY after the new chest is confirmed stable
+                _pendingClientOriginal = original as Storage_Small; // removed ONLY after the new chest is confirmed stable
                 _awaitingClientChest = true;
                 _syncDeadlineFrame = Time.frameCount + 600; // ~10s @60fps
                 Note($"client: asked host to place '{item.UniqueName}'; original kept until the moved chest is confirmed.");
@@ -423,28 +597,40 @@ namespace RaftMovableStorage
 
             if (stable)
             {
-                var ns = _hostNb;
+                var nb = _hostNb;
                 var original = _hostOriginal;
                 var slots = _hostSlots;
                 var player = ComponentManager<Network_Player>.Value;
 
-                if (slots != null) ns.GetInventoryReference()?.SetSlotsFromRGD(slots);
-                ApplyPaint(ns, _hostPaint, player);
+                // storage contents (storages only): restore locally + sync to peers via Storage_Close.
+                if (nb is Storage_Small ns && slots != null)
+                {
+                    ns.GetInventoryReference()?.SetSlotsFromRGD(slots);
+                    if (player?.Network != null && player.StorageManager != null)
+                    {
+                        try
+                        {
+                            var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
+                            player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                        }
+                        catch (System.Exception ex) { Log?.LogWarning("host content-sync RPC failed: " + ex.Message); }
+                    }
+                }
+                // generic device state: many RGD subtypes self-restore (purifier tank/battery, cooking
+                // progress, fuel tank, wind turbine) via their RestoreBlock override - the game's own
+                // load path. Restores paint+health too. Host-local (peers resync via the device / reload).
+                try { _hostRgd?.RestoreBlock(nb); }
+                catch (System.Exception ex) { Log?.LogWarning("RestoreBlock failed: " + ex.Message); }
+                // paint (also networks to peers) + sign text for ANY placeable that has them
+                ApplyPaint(nb, _hostPaint, player);
+                ApplySignText(nb, _hostText);
                 _hiddenColliders.Clear();
                 _hiddenRenderers.Clear();
                 if (original != null) { try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
 
-                if (slots != null && player?.Network != null && player.StorageManager != null)
-                {
-                    try
-                    {
-                        var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
-                        player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
-                    }
-                    catch (System.Exception ex) { Log?.LogWarning("host content-sync RPC failed: " + ex.Message); }
-                }
-                Note($"placed at {ns.transform.localPosition.ToString("F2")}; restored {slots?.Length ?? 0} slots after settling (+{delta}f, host).");
-                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null;
+                int restored = slots?.Length ?? 0;
+                Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)" + (restored > 0 ? $"; restored {restored} slots" : ""));
+                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null;
                 return;
             }
 
@@ -452,8 +638,8 @@ namespace RaftMovableStorage
             {
                 try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
                 RestoreHidden();
-                Note("can't place there - it never became supported (+" + delta + "f). Chest left where it was.");
-                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null;
+                Note("can't place there - it never became supported (+" + delta + "f). Block left where it was.");
+                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null;
             }
         }
 
@@ -544,5 +730,6 @@ namespace RaftMovableStorage
     public class Ticker : MonoBehaviour
     {
         private void Update() => Plugin.Tick();
+        private void LateUpdate() => Plugin.LateTick();
     }
 }
