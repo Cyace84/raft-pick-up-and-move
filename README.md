@@ -1,10 +1,23 @@
-# Movable Storages
+# Pick Up & Move
 
-A Raft mod for picking up a placed storage and setting it back down somewhere else, with
-everything still inside. Aim at a chest, press a key, and the normal build ghost follows your
-cursor until you click to drop it.
+A Raft mod for repositioning things you've already built. Aim at a placed object, press a key, and
+the normal build ghost follows your cursor until you click to set it back down — with its contents
+and state intact.
 
-No more emptying a chest into your hands just to nudge it one tile over.
+It moves crafted **placeables** (storage, devices, decor), **not** the raft structure itself
+(foundations, walls, floors, pillars, pipes). No more emptying a chest into your hands just to nudge
+it one tile over.
+
+## What it moves (keeping state)
+
+- **Storage** — small, medium, large, wall cabinets. Items stay inside.
+- **Cooking** — cooking pot, grill, juicer, smelter, purifier. Recipe, progress and slots survive.
+- **Power/water devices** that the game knows how to restore — fuel tank, wind turbine, and similar.
+- **Signs / plaques** — keeps the written text.
+- **Decor, furniture, plain placeables.**
+
+If an object has device state the mod can't safely carry yet (some planters/sprinklers/recyclers),
+it simply **refuses to move** rather than risk losing that state. Nothing is ever silently dropped.
 
 ## Install
 
@@ -14,19 +27,15 @@ No more emptying a chest into your hands just to nudge it one tile over.
 
 ## How to use
 
-Look at a storage and press the move key (default `M`). The chest lifts into placement mode and a
-ghost tracks your aim. Left-click to place it. Right-click, or press the key again, to cancel.
+Look at a movable object and press the move key (default `M`). It lifts into placement mode and a
+ghost tracks your aim. Left-click to place it. Right-click, or press the key again, to cancel and
+leave it where it was.
 
 Change the key in `BepInEx/config/com.cyace84.raftmovablestorage.cfg`.
 
 ## Multiplayer
 
-Works in co-op, as host or as a client. Only the player moving a chest needs the mod. Everyone else
-just watches it move, contents and all, with stock Raft.
-
-## Compatibility
-
-Handles the regular storages (small, medium, large). Single-player and co-op both work.
+Works in co-op, as host or as a client. Only the player moving an object needs the mod.
 
 ## Build from source
 

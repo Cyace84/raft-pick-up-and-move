@@ -38,7 +38,7 @@ namespace RaftMovableStorage
     // replicated chest to sync contents (see ConfirmMove / PollClientChest). Contents travel via
     // the vanilla Message_Storage_Close path. Only the player moving a chest needs the mod.
 
-    [BepInPlugin(Guid, "Movable Storages", "1.0.0")]
+    [BepInPlugin(Guid, "Pick Up & Move", "1.0.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.cyace84.raftmovablestorage";
@@ -336,22 +336,11 @@ namespace RaftMovableStorage
             if (b.GetComponentInChildren<TextWriterObject>() != null) return false;   // sign text handled
             try
             {
-                var rgd = b.Serialize_Save();
-                if (rgd != null)
-                {
-                    var t = rgd.GetType();
-                    if (t != typeof(RGD_Block))
-                    {
-                        // a device RGD subtype. SAFE if it self-restores via a RestoreBlock override
-                        // (purifier/cooking/fueltank/windturbine) - we call rgd.RestoreBlock(newBlock).
-                        var m = t.GetMethod("RestoreBlock", new[] { typeof(Block) });
-                        if (m != null && m.DeclaringType != typeof(RGD_Block)) return false;
-                        return true;   // subtype w/o override (sprinkler/recycler/cropplot) => unhandled
-                    }
-                }
+                var rgd = CaptureRestorableRgd(b);
+                if (rgd != null && OverridesRestoreBlock(rgd.GetType())) return false; // self-restoring device
+                if (rgd != null && rgd.GetType() != typeof(RGD_Block)) return true;    // subtype w/o override => unhandled
                 // base RGD_Block (or null): refuse only if it has an unhandled networked stateful
-                // sibling whose state we don't carry (e.g. a seat's occupancy component). Plain
-                // stateless decor passes.
+                // sibling whose state we don't carry. Plain stateless decor passes.
                 if (b.networkType != NetworkType.None) return true;
                 if (b.networkedBehaviour != null || b.networkedIDBehaviour != null) return true;
             }
@@ -359,12 +348,39 @@ namespace RaftMovableStorage
             return false;
         }
 
-        // Full save snapshot of the block at pickup; null if it can't serialize. Used to re-apply
-        // self-restoring device state (purifier/cooking/fueltank/windturbine) on the recreated block.
-        private static RGD_Block TryCaptureRgd(Block b)
+        // True if the RGD type provides its own RestoreBlock(Block) (self-restoring device state).
+        private static bool OverridesRestoreBlock(System.Type t)
         {
-            try { return b.Serialize_Save() as RGD_Block; } catch { return null; }
+            var m = t.GetMethod("RestoreBlock", new[] { typeof(Block) });
+            return m != null && m.DeclaringType != typeof(RGD_Block);
         }
+
+        // Full save snapshot used to replay self-restoring device state on the recreated block.
+        // Networked devices (cooking pot/juicer/grill) keep their save method on a SIBLING component
+        // (CookingTable : MonoBehaviour_ID_Network), NOT on Block - Block.Serialize_Save returns null
+        // for a networked block. So when the Block-level save isn't a self-restoring subtype, scan the
+        // same GameObject's components for a Serialize_Save() -> RGD_Block that overrides RestoreBlock
+        // (e.g. CookingTable -> RGD_Block_CookingPot, whose RestoreBlock replays cook timer/portions/
+        // recipe/slots via CookingTable.RestoreCookingPot).
+        private static RGD_Block CaptureRestorableRgd(Block b)
+        {
+            try
+            {
+                var direct = b.Serialize_Save() as RGD_Block;
+                if (direct != null && OverridesRestoreBlock(direct.GetType())) return direct;
+                foreach (var comp in b.GetComponents<MonoBehaviour>())
+                {
+                    if (comp == null || comp is Block) continue;
+                    var m = comp.GetType().GetMethod("Serialize_Save", System.Type.EmptyTypes);
+                    if (m == null || !typeof(RGD).IsAssignableFrom(m.ReturnType)) continue;
+                    if (m.Invoke(comp, null) is RGD_Block r && OverridesRestoreBlock(r.GetType())) return r;
+                }
+                return direct;   // plain RGD_Block, an unhandled subtype, or null
+            }
+            catch { return null; }
+        }
+
+        private static RGD_Block TryCaptureRgd(Block b) => CaptureRestorableRgd(b);
 
         // Sign/plaque text (and any TextWriterObject-backed block). Null for everything else.
         private static string TryGetSignText(Block b)
