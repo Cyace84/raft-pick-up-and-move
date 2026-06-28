@@ -337,7 +337,7 @@ namespace RaftMovableStorage
             try
             {
                 var rgd = CaptureRestorableRgd(b);
-                if (rgd != null && OverridesRestoreBlock(rgd.GetType())) return false; // self-restoring device
+                if (rgd != null && CanRestoreDevice(rgd)) return false;                // device state we replay
                 if (rgd != null && rgd.GetType() != typeof(RGD_Block)) return true;    // subtype w/o override => unhandled
                 // base RGD_Block (or null): refuse only if it has an unhandled networked stateful
                 // sibling whose state we don't carry. Plain stateless decor passes.
@@ -355,6 +355,44 @@ namespace RaftMovableStorage
             return m != null && m.DeclaringType != typeof(RGD_Block);
         }
 
+        // True if we know how to replay this RGD's device state onto a freshly created block: either it
+        // self-restores via a RestoreBlock override, or it's a type we have a dedicated adapter for
+        // (cropplot plants, sprinkler water+battery, recycler/extractor tanks). Keep in sync with
+        // ApplyDeviceState - a type listed here MUST be restored there, or moving it would lose state.
+        private static bool CanRestoreDevice(RGD_Block rgd)
+            => rgd != null && (OverridesRestoreBlock(rgd.GetType())
+                || rgd is RGD_Cropplot || rgd is RGD_Block_Sprinkler || rgd is RGD_Block_Recycler);
+
+        // Replay captured device state onto the recreated block via the game's own load-path restore
+        // methods. Self-restoring subtypes use RestoreBlock; the others keep their save data on a nested
+        // RGD reached through a dedicated restore call (these don't override RestoreBlock). All host-local
+        // (peers resync via the device / reload). Restores paint+health for the override path too.
+        private static void ApplyDeviceState(RGD_Block rgd, Block nb)
+        {
+            if (rgd == null || nb == null) return;
+            try
+            {
+                if (OverridesRestoreBlock(rgd.GetType())) { rgd.RestoreBlock(nb); return; }
+                switch (rgd)
+                {
+                    case RGD_Cropplot rc:
+                        var plot = nb.GetComponent<Cropplot>();
+                        var pm = ComponentManager<Network_Player>.Value?.PlantManager;
+                        if (plot != null && pm != null) rc.RestoreCropplot(plot, pm);
+                        break;
+                    case RGD_Block_Sprinkler rs:
+                        var spr = nb.GetComponent<Sprinkler>();
+                        if (spr != null) rs.rgdSprinkler?.RestoreSprinkler(spr);
+                        break;
+                    case RGD_Block_Recycler rr:
+                        var ext = nb.GetComponent<Placeable_Extractor>();
+                        if (ext != null) rr.rgdRecycler?.RestoreExtractor(ext);
+                        break;
+                }
+            }
+            catch (System.Exception ex) { Log?.LogWarning("device restore failed: " + ex.Message); }
+        }
+
         // Full save snapshot used to replay self-restoring device state on the recreated block.
         // Networked devices (cooking pot/juicer/grill) keep their save method on a SIBLING component
         // (CookingTable : MonoBehaviour_ID_Network), NOT on Block - Block.Serialize_Save returns null
@@ -367,13 +405,13 @@ namespace RaftMovableStorage
             try
             {
                 var direct = b.Serialize_Save() as RGD_Block;
-                if (direct != null && OverridesRestoreBlock(direct.GetType())) return direct;
+                if (direct != null && CanRestoreDevice(direct)) return direct;
                 foreach (var comp in b.GetComponents<MonoBehaviour>())
                 {
                     if (comp == null || comp is Block) continue;
                     var m = comp.GetType().GetMethod("Serialize_Save", System.Type.EmptyTypes);
                     if (m == null || !typeof(RGD).IsAssignableFrom(m.ReturnType)) continue;
-                    if (m.Invoke(comp, null) is RGD_Block r && OverridesRestoreBlock(r.GetType())) return r;
+                    if (m.Invoke(comp, null) is RGD_Block r && CanRestoreDevice(r)) return r;
                 }
                 return direct;   // plain RGD_Block, an unhandled subtype, or null
             }
@@ -632,11 +670,10 @@ namespace RaftMovableStorage
                         catch (System.Exception ex) { Log?.LogWarning("host content-sync RPC failed: " + ex.Message); }
                     }
                 }
-                // generic device state: many RGD subtypes self-restore (purifier tank/battery, cooking
-                // progress, fuel tank, wind turbine) via their RestoreBlock override - the game's own
+                // generic device state: self-restoring subtypes (purifier tank/battery, cooking progress,
+                // fuel tank, wind turbine) via RestoreBlock; cropplots via RestoreCropplot. The game's own
                 // load path. Restores paint+health too. Host-local (peers resync via the device / reload).
-                try { _hostRgd?.RestoreBlock(nb); }
-                catch (System.Exception ex) { Log?.LogWarning("RestoreBlock failed: " + ex.Message); }
+                ApplyDeviceState(_hostRgd, nb);
                 // paint (also networks to peers) + sign text for ANY placeable that has them
                 ApplyPaint(nb, _hostPaint, player);
                 ApplySignText(nb, _hostText);
