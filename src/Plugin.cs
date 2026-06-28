@@ -75,6 +75,7 @@ namespace RaftMovableStorage
         // renderers/colliders we disabled to hide the original while carrying (restored on cancel)
         private static readonly List<Collider> _hiddenColliders = new List<Collider>();
         private static readonly List<Renderer> _hiddenRenderers = new List<Renderer>();
+        private static readonly List<Canvas> _hiddenCanvases = new List<Canvas>();   // device screens (Reciever radar) aren't Renderers
 
         // CLIENT (non-host) placement is async: we ask the host to place the chest, then must wait
         // for the host's reply to spawn it locally before we can push its contents. State for that.
@@ -169,6 +170,14 @@ namespace RaftMovableStorage
 
             if (moving == null) return;
 
+            // one-frame-deferred cosmetic hide of the carried stack (see TryBeginMove note)
+            if (_hideDepsPending)
+            {
+                _hideDepsPending = false;
+                foreach (var dep in DetectCascadeTreeBlocks(moving))
+                    HideVisual(dep);
+            }
+
             // carrying: right-click cancels, left-click confirms placement at the ghost
             if (Input.GetMouseButtonDown(1)) { Trace("rmb: cancel carry."); CancelMove(); return; }
             if (Input.GetMouseButtonDown(0))
@@ -234,10 +243,16 @@ namespace RaftMovableStorage
             // it caused the duplicate). Disabling only Renderers+Colliders keeps registration intact.
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
+            _hiddenCanvases.Clear();
             foreach (var c in block.GetComponentsInChildren<Collider>())
                 if (c.enabled) { c.enabled = false; _hiddenColliders.Add(c); }
-            foreach (var r in block.GetComponentsInChildren<Renderer>())
-                if (r.enabled) { r.enabled = false; _hiddenRenderers.Add(r); }
+            HideVisual(block);
+
+            // VISUAL: hide anything resting on this block while carrying, so a moved table's decor
+            // doesn't float in mid-air. Deferred one frame (_hideDepsPending) because the stack predicate
+            // (IsStable with the original's colliders off) reads stale on the SAME frame we just disabled
+            // them - by the next Tick it's settled, same as at placement time. Cosmetic only.
+            _hideDepsPending = true;
 
             // make sure the build creator is active so the ghost shows, then engage it
             var bc = player.BlockCreator;
@@ -260,12 +275,24 @@ namespace RaftMovableStorage
             movingRgd = null;
         }
 
+        // Hide a block's visuals during carry: Renderers AND Canvases (a Reciever's radar screen is a
+        // world Canvas, not a Renderer, so a renderer-only hide left it floating at the old spot).
+        private static void HideVisual(Block b)
+        {
+            foreach (var r in b.GetComponentsInChildren<Renderer>())
+                if (r.enabled) { r.enabled = false; _hiddenRenderers.Add(r); }
+            foreach (var cv in b.GetComponentsInChildren<Canvas>())
+                if (cv.enabled) { cv.enabled = false; _hiddenCanvases.Add(cv); }
+        }
+
         private static void RestoreHidden()
         {
             foreach (var c in _hiddenColliders) if (c != null) c.enabled = true;
             foreach (var r in _hiddenRenderers) if (r != null) r.enabled = true;
+            foreach (var cv in _hiddenCanvases) if (cv != null) cv.enabled = true;
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
+            _hiddenCanvases.Clear();
         }
 
         // Single source of truth for "can this block be moved right now" - used by both the in-world
@@ -366,7 +393,7 @@ namespace RaftMovableStorage
         private static bool CanRestoreDevice(RGD_Block rgd)
             => rgd != null && (OverridesRestoreBlock(rgd.GetType())
                 || rgd is RGD_Cropplot || rgd is RGD_Block_Sprinkler || rgd is RGD_Block_Recycler
-                || rgd is RGD_ResearchTable);
+                || rgd is RGD_ResearchTable || rgd is RGD_Reciever || rgd is RGDTrophyHolder);
 
         // Replay captured device state onto the recreated block via the game's own load-path restore
         // methods. Self-restoring subtypes use RestoreBlock; the others keep their save data on a nested
@@ -397,6 +424,22 @@ namespace RaftMovableStorage
                         var table = nb.GetComponent<ResearchTable>();
                         if (table != null) rt.RestoreResearchTable(table);
                         break;
+                    case RGDTrophyHolder th:
+                        var holder = nb.GetComponentInChildren<TrophyHolder>();
+                        if (holder != null) th.RestoreTrophyHolder(holder);
+                        break;
+                    case RGD_Reciever rcv:
+                        // frequency + battery + antenna links. Restore directly NOW (sets frequency and
+                        // battery synchronously while we hold context - the delayed coroutine alone was
+                        // unreliable and dropped both), then a short coroutine re-runs it so antenna links
+                        // reconnect after everything has registered.
+                        var recv = nb.GetComponent<Reciever>();
+                        if (recv != null)
+                        {
+                            try { recv.Restore(rcv); } catch (System.Exception rex) { Log?.LogWarning("reciever restore: " + rex.Message); }
+                            try { recv.StartCoroutine(rcv.RestoreLate(0.5f, recv)); } catch { }
+                        }
+                        break;
                 }
             }
             catch (System.Exception ex) { Log?.LogWarning("device restore failed: " + ex.Message); }
@@ -423,7 +466,10 @@ namespace RaftMovableStorage
         {
             var list = new System.Collections.Generic.List<RGD_Block>();
             try { list.Add(b.Serialize_Save() as RGD_Block); } catch { }
-            foreach (var comp in b.GetComponents<MonoBehaviour>())
+            // GetComponentsInChildren, not GetComponents: some blocks keep their stateful save component
+            // on a CHILD (e.g. TrophyHolder - the mounted head), and missing it would let the gate treat
+            // the block as stateless and silently drop that state on move.
+            foreach (var comp in b.GetComponentsInChildren<MonoBehaviour>())
             {
                 if (comp == null || comp is Block) continue;
                 var m = comp.GetType().GetMethod("Serialize_Save", System.Type.EmptyTypes);
@@ -434,6 +480,179 @@ namespace RaftMovableStorage
         }
 
         private static RGD_Block TryCaptureRgd(Block b) => CaptureRestorableRgd(b);
+
+        // ---- group move (a stack of placeables resting on the moved block) ----
+        // One captured piece: its buildable + full state + transform RELATIVE to the base block, so it
+        // can be re-placed by the same rigid base->base' offset (the whole stack moves as one body).
+        private sealed class Carried
+        {
+            public Item_Base item;
+            public DPS dps;
+            public RGD_Slot[] slots;
+            public string text;
+            public RGD_Block rgd;
+            public Paint paint;
+            public Block original;
+            public Vector3 localPos;     // position in the base block's local frame (raft-local)
+            public Quaternion localRot;  // rotation relative to the base block (raft-local)
+        }
+
+        private static readonly System.Collections.Generic.List<Block> _depOriginals = new System.Collections.Generic.List<Block>();
+        private static readonly System.Collections.Generic.List<Block> _newDependents = new System.Collections.Generic.List<Block>();
+        private static readonly System.Collections.Generic.List<Collider> _depColliderDisabled = new System.Collections.Generic.List<Collider>();
+        private static int _depMovedCount;
+        private static bool _hideDepsPending;
+
+        private static Carried Capture(Block b, Block relativeTo)
+        {
+            var s = (b is Storage_Small ss && ss.GetInventoryReference() != null) ? ss.GetInventoryReference().GetRGDSlots() : null;
+            return new Carried
+            {
+                item = b.buildableItem,
+                dps = b.dpsType,
+                slots = s,
+                text = TryGetSignText(b),
+                rgd = TryCaptureRgd(b),
+                paint = CapturePaint(b),
+                original = b,
+                // express the piece RELATIVE to the base block in raft-local space, so re-placing it by
+                // the base's new local pos/rot moves the whole stack as one rigid body (CreateBlockCheat
+                // takes raft-local position + euler, like ghost.localPosition/localEulerAngles).
+                localPos = Quaternion.Inverse(relativeTo.transform.localRotation) * (b.transform.localPosition - relativeTo.transform.localPosition),
+                localRot = Quaternion.Inverse(relativeTo.transform.localRotation) * b.transform.localRotation,
+            };
+        }
+
+        // Apply a block's carried state onto a freshly created block (storages sync to peers, devices
+        // replay, paint+sign). Shared by the moved block and every dependent in its stack.
+        private static void ApplyState(Block nb, RGD_Slot[] slots, RGD_Block rgd, Paint paint, string text, Network_Player player)
+        {
+            if (nb is Storage_Small ns && slots != null)
+            {
+                ns.GetInventoryReference()?.SetSlotsFromRGD(slots);
+                if (player?.Network != null && player.StorageManager != null)
+                {
+                    try
+                    {
+                        var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
+                        player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                    }
+                    catch (System.Exception ex) { Log?.LogWarning("host content-sync RPC failed: " + ex.Message); }
+                }
+            }
+            ApplyDeviceState(rgd, nb);
+            ApplyPaint(nb, paint, player);
+            ApplySignText(nb, text);
+        }
+
+        // Detect the cascade tree of `original` (what removing it would destroy) and re-create each piece
+        // on `nb` at the same rigid offset, replaying its state. Returns false (with a reason) if any
+        // piece has unhandled state or can't be re-created - the caller then undoes the whole swap.
+        // Populates _depOriginals (to remove on success), _newDependents (to discard on abort) and
+        // _depColliderDisabled (to re-enable on abort).
+        private static bool TryMoveDependents(Block original, Block nb, Network_Player player, out string failMsg)
+        {
+            failMsg = null;
+            _depOriginals.Clear(); _newDependents.Clear(); _depColliderDisabled.Clear(); _depMovedCount = 0;
+            if (original == null || nb == null) return true;
+            var bc = player?.BlockCreator;
+            if (bc == null) return true;
+
+            // ignore nb's own colliders during detection so a moved-block placed near its old spot can't
+            // "support" a dependent and hide it from us (which would let it cascade = data loss).
+            var nbDisabled = new System.Collections.Generic.List<Collider>();
+            foreach (var c in nb.GetComponentsInChildren<Collider>())
+                if (c.enabled) { c.enabled = false; nbDisabled.Add(c); }
+            try
+            {
+                var captured = new System.Collections.Generic.List<Carried>();
+                // frontier = blocks whose colliders are OFF (original is already hidden from carry). For each,
+                // any nearby block now reading !IsStable() rested on it -> capture it, turn ITS colliders off
+                // to expose deeper pieces. Mirrors DestroyBlock's recursive cascade exactly.
+                var frontier = new System.Collections.Generic.List<Block> { original };
+                for (int i = 0; i < frontier.Count && captured.Count < 128; i++)
+                {
+                    var hb = frontier[i];
+                    float dist = hb.buildableItem?.settings_buildable != null ? hb.buildableItem.settings_buildable.UnstableCheckDistance : 3.5f;
+                    foreach (var pb in BlockCreator.GetPlacedBlocks())
+                    {
+                        if (pb == null || pb == original || pb == nb || frontier.Contains(pb)) continue;
+                        if (captured.Exists(c => c.original == pb)) continue;
+                        if (Vector3.Distance(pb.transform.position, hb.transform.position) > dist) continue;
+                        if (pb.IsStable()) continue;                       // still supported elsewhere - not ours
+                        var pbi = pb.buildableItem;
+                        if (pbi?.settings_buildable == null || !pbi.settings_buildable.Placeable || HasUnhandledState(pb))
+                        { failMsg = $"Didn't move - '{(pbi != null ? pbi.UniqueName : "something")}' resting on it has state I can't carry yet."; return false; }
+                        captured.Add(Capture(pb, original));
+                        frontier.Add(pb);
+                        foreach (var c in pb.GetComponentsInChildren<Collider>())
+                            if (c.enabled) { c.enabled = false; _depColliderDisabled.Add(c); }
+                    }
+                }
+
+                foreach (var c in captured)
+                {
+                    var localPos = nb.transform.localPosition + nb.transform.localRotation * c.localPos;
+                    var localEuler = (nb.transform.localRotation * c.localRot).eulerAngles;
+                    Block nd;
+                    try { nd = bc.CreateBlockCheat(c.item, localPos, localEuler, c.dps, -1); }
+                    catch (System.Exception ex) { failMsg = "Didn't move the stack: " + ex.Message; return false; }
+                    if (nd == null) { failMsg = "Didn't move the stack - couldn't recreate a piece on top."; return false; }
+                    _newDependents.Add(nd);
+                    ApplyState(nd, c.slots, c.rgd, c.paint, c.text, player);
+                    _depOriginals.Add(c.original);
+                }
+                _depMovedCount = captured.Count;
+                return true;
+            }
+            catch (System.Exception ex) { failMsg = "Didn't move the stack: " + ex.Message; return false; }
+            finally { foreach (var c in nbDisabled) if (c != null) c.enabled = true; }
+        }
+
+        // Cosmetic detection of the cascade tree for hiding during carry. Disables each found piece's
+        // colliders to expose deeper ones, then RE-ENABLES all of them (placement-time detection needs
+        // colliders intact). Returns the blocks resting (directly or transitively) on `original`.
+        private static System.Collections.Generic.List<Block> DetectCascadeTreeBlocks(Block original)
+        {
+            var found = new System.Collections.Generic.List<Block>();
+            var tempOff = new System.Collections.Generic.List<Collider>();
+            try
+            {
+                var frontier = new System.Collections.Generic.List<Block> { original };  // original colliders already off
+                for (int i = 0; i < frontier.Count && found.Count < 128; i++)
+                {
+                    var hb = frontier[i];
+                    float dist = hb.buildableItem?.settings_buildable != null ? hb.buildableItem.settings_buildable.UnstableCheckDistance : 3.5f;
+                    foreach (var pb in BlockCreator.GetPlacedBlocks())
+                    {
+                        if (pb == null || pb == original || frontier.Contains(pb) || found.Contains(pb)) continue;
+                        if (Vector3.Distance(pb.transform.position, hb.transform.position) > dist) continue;
+                        if (pb.IsStable()) continue;
+                        var pbi = pb.buildableItem;
+                        if (pbi?.settings_buildable == null || !pbi.settings_buildable.Placeable) continue;
+                        found.Add(pb);
+                        frontier.Add(pb);
+                        foreach (var c in pb.GetComponentsInChildren<Collider>())
+                            if (c.enabled) { c.enabled = false; tempOff.Add(c); }
+                    }
+                }
+            }
+            catch { }
+            finally { foreach (var c in tempOff) if (c != null) c.enabled = true; }
+            return found;
+        }
+
+        private static void DiscardNewDependents()
+        {
+            foreach (var d in _newDependents) if (d != null) { try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
+            _newDependents.Clear(); _depOriginals.Clear();
+        }
+
+        private static void RestoreDependentColliders()
+        {
+            foreach (var c in _depColliderDisabled) if (c != null) c.enabled = true;
+            _depColliderDisabled.Clear();
+        }
 
         // Sign/plaque text (and any TextWriterObject-backed block). Null for everything else.
         private static string TryGetSignText(Block b)
@@ -671,33 +890,40 @@ namespace RaftMovableStorage
                 var slots = _hostSlots;
                 var player = ComponentManager<Network_Player>.Value;
 
-                // storage contents (storages only): restore locally + sync to peers via Storage_Close.
-                if (nb is Storage_Small ns && slots != null)
+                // the moved block's own state (slots / device / paint / sign).
+                ApplyState(nb, slots, _hostRgd, _hostPaint, _hostText, player);
+
+                // GROUP MOVE: anything resting on the original (decor on a table, a stack) would be
+                // cascaded away when we remove it. Detect that exact cascade set with the game's own
+                // predicate - with the original's colliders disabled (as they've been all carry) a block
+                // it supported reads !IsStable() - then re-create each on the moved block by the same rigid
+                // A->A' offset and replay its state. Atomic: if any piece has state we can't carry or a
+                // re-create fails, undo EVERYTHING (discard nb + new pieces, restore the original) so the
+                // stack is never half-moved or lost.
+                if (!TryMoveDependents(original, nb, player, out string depFail))
                 {
-                    ns.GetInventoryReference()?.SetSlotsFromRGD(slots);
-                    if (player?.Network != null && player.StorageManager != null)
-                    {
-                        try
-                        {
-                            var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
-                            player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
-                        }
-                        catch (System.Exception ex) { Log?.LogWarning("host content-sync RPC failed: " + ex.Message); }
-                    }
+                    DiscardNewDependents();
+                    RestoreDependentColliders();
+                    try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
+                    RestoreHidden();
+                    Note(depFail);
+                    _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null;
+                    return;
                 }
-                // generic device state: self-restoring subtypes (purifier tank/battery, cooking progress,
-                // fuel tank, wind turbine) via RestoreBlock; cropplots via RestoreCropplot. The game's own
-                // load path. Restores paint+health too. Host-local (peers resync via the device / reload).
-                ApplyDeviceState(_hostRgd, nb);
-                // paint (also networks to peers) + sign text for ANY placeable that has them
-                ApplyPaint(nb, _hostPaint, player);
-                ApplySignText(nb, _hostText);
+
                 _hiddenColliders.Clear();
                 _hiddenRenderers.Clear();
+                _hiddenCanvases.Clear();
+                // remove originals: dependents first (their colliders were disabled during detection),
+                // then the base block - nothing rests on it now, so no cascade victims.
+                foreach (var d in _depOriginals) if (d != null) { try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
+                _depOriginals.Clear(); _depColliderDisabled.Clear(); _newDependents.Clear();
                 if (original != null) { try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
 
                 int restored = slots?.Length ?? 0;
-                Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)" + (restored > 0 ? $"; restored {restored} slots" : ""));
+                Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"
+                    + (restored > 0 ? $"; restored {restored} slots" : "")
+                    + (_depMovedCount > 0 ? $"; moved {_depMovedCount} on top" : ""));
                 _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null;
                 return;
             }
@@ -763,6 +989,7 @@ namespace RaftMovableStorage
             // stable + filled -> NOW it is safe to delete the original we kept hidden
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
+            _hiddenCanvases.Clear();
             if (_pendingClientOriginal != null)
             {
                 try { BlockCreator.RemoveBlockNetwork(_pendingClientOriginal, null, true); } catch { }
