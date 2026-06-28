@@ -15,10 +15,15 @@ namespace RaftMovableStorage
     // ARCHITECTURE NOTE (learned from runtime diagnostics in this BepInEx 5 + Wine/CrossOver setup):
     //   * BaseUnityPlugin.Update() is NOT pumped here, and the plugin component gets Destroyed a few
     //     seconds after Awake (which would also rip any Harmony patches via UnpatchSelf).
-    //   * Therefore ALL per-frame logic lives on our own DontDestroyOnLoad `Ticker` GameObject, and we
-    //     use NO Harmony at all. Placement is handled by reading the vanilla ghost (BlockCreator.selectedBlock)
-    //     directly on left-click. Vanilla cannot double-place the chest because the storage item is not in
-    //     the player's inventory while it is being carried.
+    //   * Therefore ALL per-frame logic lives on our own DontDestroyOnLoad `Ticker` GameObject.
+    //     Placement is handled by reading the vanilla ghost (BlockCreator.selectedBlock) directly on
+    //     left-click. Vanilla cannot double-place the chest because the storage item is not in the
+    //     player's inventory while it is being carried.
+    //   * ONE Harmony postfix is used, on Storage_Small.OnIsRayed, only to draw the "Move" key hint
+    //     under the vanilla "Open" prompt. This is safe in this env: the patch is invoked by the
+    //     game's own (pumped) raycast system, not our Update, and Harmony detours live in the global
+    //     patch registry - BaseUnityPlugin has no OnDestroy/UnpatchSelf (verified by decompile), so
+    //     the plugin component being destroyed after Awake does NOT remove them.
     //
     // Recon basis (verified by decompiling Assembly-CSharp.dll):
     //   Storage_Small : Block          GetInventoryReference() : Inventory
@@ -85,6 +90,8 @@ namespace RaftMovableStorage
         private static int _hostVerifyDeadline;
         private static int _hostLastLoggedStable; // -1 unknown, 0 false, 1 true (log only on change)
         private static Paint _hostPaint;
+        private Harmony _harmony;
+        private static GameObject _tickerGo;
 
         private void Awake()
         {
@@ -102,8 +109,26 @@ namespace RaftMovableStorage
             DontDestroyOnLoad(go);
             go.hideFlags = HideFlags.HideAndDontSave;
             go.AddComponent<Ticker>();
+            _tickerGo = go;
+
+            // ONE Harmony postfix for the in-world "Move" key hint (see architecture note). Invoked by
+            // the game's raycast system, independent of our Update; patches persist past Awake.
+            try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
+            catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
             Note($"{Info.Metadata.Name} {Info.Metadata.Version} loaded. Move key = {MoveKey.Value}.");
+        }
+
+        // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
+        // patch, and clear carry state so a hot-reloaded copy doesn't duplicate input handling or the
+        // OnIsRayed postfix. No-op cost in production (never called outside the dev reloader).
+        public static void __MonoLabUnload()
+        {
+            try { Harmony.UnpatchID(Guid); } catch { }
+            try { if (_tickerGo != null) UnityEngine.Object.Destroy(_tickerGo); } catch { }
+            _tickerGo = null;
+            moving = null; movingItem = null; movingSlots = null;
+            _hostVerifying = false; _awaitingClientChest = false;
         }
 
         // Info = user-facing milestones; Trace = diagnostic non-events (missed raycast, bad spot).
@@ -490,6 +515,28 @@ namespace RaftMovableStorage
                 _pendingClientOriginal = null;
             }
             _awaitingClientChest = false; _syncSlots = null;
+        }
+    }
+
+    // Draws a "<key> Move" hint under the vanilla "Open" prompt whenever the player aims at a closed
+    // storage. Postfix so it runs right after Storage_Small.OnIsRayed set its own prompt (deterministic
+    // ordering, no flicker); clearAllTexts:false keeps the game's index-0 prompt and stacks ours at
+    // index 1. The game's OnRayExit/HideDisplayTexts clears both when you look away.
+    [HarmonyPatch(typeof(Storage_Small), nameof(Storage_Small.OnIsRayed))]
+    internal static class Patch_StorageMoveHint
+    {
+        private static void Postfix(Storage_Small __instance)
+        {
+            try
+            {
+                if (Plugin.moving != null) return;                       // already carrying one
+                if (CanvasHelper.ActiveMenu != MenuType.None) return;    // a menu is open
+                if (__instance == null || __instance.IsOpen) return;    // chest is open
+                var dtm = ComponentManager<DisplayTextManager>.Value;
+                if (dtm == null) return;
+                dtm.ShowText("Move", Plugin.MoveKey.Value.MainKey, 1, 0, false);
+            }
+            catch { }
         }
     }
 
