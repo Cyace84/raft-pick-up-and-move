@@ -336,13 +336,17 @@ namespace RaftMovableStorage
             if (b.GetComponentInChildren<TextWriterObject>() != null) return false;   // sign text handled
             try
             {
-                var rgd = CaptureRestorableRgd(b);
-                if (rgd != null && CanRestoreDevice(rgd)) return false;                // device state we replay
-                if (rgd != null && rgd.GetType() != typeof(RGD_Block)) return true;    // subtype w/o override => unhandled
-                // base RGD_Block (or null): refuse only if it has an unhandled networked stateful
-                // sibling whose state we don't carry. Plain stateless decor passes.
-                if (b.networkType != NetworkType.None) return true;
-                if (b.networkedBehaviour != null || b.networkedIDBehaviour != null) return true;
+                // The game persists per-instance state ONLY through Serialize_Save (-> an RGD_Block).
+                // So scan every RGD any component on this block would save: a plain RGD_Block (paint/
+                // health, covered by base restore + ApplyPaint) or null means nothing to lose; a SUBTYPE
+                // we can replay is fine; a stateful subtype we don't handle is the only thing we refuse.
+                // This lets stateless-but-networked decor (chairs, etc.) move, without ever guessing.
+                foreach (var rgd in CollectSavedRgds(b))
+                {
+                    if (rgd == null || rgd.GetType() == typeof(RGD_Block)) continue;
+                    if (CanRestoreDevice(rgd)) continue;
+                    return true;                                                      // stateful subtype, unhandled
+                }
             }
             catch { return true; }                                                   // unknown => refuse (safe)
             return false;
@@ -361,7 +365,8 @@ namespace RaftMovableStorage
         // ApplyDeviceState - a type listed here MUST be restored there, or moving it would lose state.
         private static bool CanRestoreDevice(RGD_Block rgd)
             => rgd != null && (OverridesRestoreBlock(rgd.GetType())
-                || rgd is RGD_Cropplot || rgd is RGD_Block_Sprinkler || rgd is RGD_Block_Recycler);
+                || rgd is RGD_Cropplot || rgd is RGD_Block_Sprinkler || rgd is RGD_Block_Recycler
+                || rgd is RGD_ResearchTable);
 
         // Replay captured device state onto the recreated block via the game's own load-path restore
         // methods. Self-restoring subtypes use RestoreBlock; the others keep their save data on a nested
@@ -388,6 +393,10 @@ namespace RaftMovableStorage
                         var ext = nb.GetComponent<Placeable_Extractor>();
                         if (ext != null) rr.rgdRecycler?.RestoreExtractor(ext);
                         break;
+                    case RGD_ResearchTable rt:
+                        var table = nb.GetComponent<ResearchTable>();
+                        if (table != null) rt.RestoreResearchTable(table);
+                        break;
                 }
             }
             catch (System.Exception ex) { Log?.LogWarning("device restore failed: " + ex.Message); }
@@ -402,20 +411,26 @@ namespace RaftMovableStorage
         // recipe/slots via CookingTable.RestoreCookingPot).
         private static RGD_Block CaptureRestorableRgd(Block b)
         {
-            try
+            try { foreach (var r in CollectSavedRgds(b)) if (r != null && CanRestoreDevice(r)) return r; }
+            catch { }
+            return null;   // nothing we specifically replay (stateless, or an unhandled subtype the gate blocks)
+        }
+
+        // Every RGD_Block any component on this block would persist: the Block component itself plus each
+        // sibling MonoBehaviour_Network with its own Serialize_Save (cooking/sprinkler/extractor/research
+        // keep theirs there, not on Block). Best-effort: a throwing/odd component is skipped, not fatal.
+        private static System.Collections.Generic.List<RGD_Block> CollectSavedRgds(Block b)
+        {
+            var list = new System.Collections.Generic.List<RGD_Block>();
+            try { list.Add(b.Serialize_Save() as RGD_Block); } catch { }
+            foreach (var comp in b.GetComponents<MonoBehaviour>())
             {
-                var direct = b.Serialize_Save() as RGD_Block;
-                if (direct != null && CanRestoreDevice(direct)) return direct;
-                foreach (var comp in b.GetComponents<MonoBehaviour>())
-                {
-                    if (comp == null || comp is Block) continue;
-                    var m = comp.GetType().GetMethod("Serialize_Save", System.Type.EmptyTypes);
-                    if (m == null || !typeof(RGD).IsAssignableFrom(m.ReturnType)) continue;
-                    if (m.Invoke(comp, null) is RGD_Block r && CanRestoreDevice(r)) return r;
-                }
-                return direct;   // plain RGD_Block, an unhandled subtype, or null
+                if (comp == null || comp is Block) continue;
+                var m = comp.GetType().GetMethod("Serialize_Save", System.Type.EmptyTypes);
+                if (m == null || !typeof(RGD).IsAssignableFrom(m.ReturnType)) continue;
+                try { list.Add(m.Invoke(comp, null) as RGD_Block); } catch { }
             }
-            catch { return null; }
+            return list;
         }
 
         private static RGD_Block TryCaptureRgd(Block b) => CaptureRestorableRgd(b);
