@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -81,6 +82,26 @@ namespace RaftMovableStorage
         // for the host's reply to spawn it locally before we can push its contents. State for that.
         private static bool _awaitingClientChest;
         private static RGD_Slot[] _syncSlots;
+
+        // CLIENT-MOVES-ANYTHING (path a): a non-host mover can't authoritatively create/restore a
+        // device, so it asks the HOST (who also runs the mod) to do the whole move. We use a private
+        // Steam P2P channel (the game's session is already open, channels just multiplex) carrying a
+        // tiny request; the host reads the block's OWN authoritative state and runs the normal host
+        // pipeline. Original stays hidden on the client until the host's removal replicates back.
+        private const int MoveChannel = 120;
+        private const uint MoveMagic = 0x504D5645;   // 'PMVE'
+        private static bool _awaitingHostMove;
+        private static Block _pendingClientMoveOriginal;
+        private static int _clientMoveDeadlineFrame;
+        // captured from our own (replicated) original so we can restore the moved block on OUR view -
+        // the host restores its own view + the save, but device state (cooking pot/juicer/grill) does
+        // not auto-replicate back to us after a programmatic restore.
+        private static RGD_Block _clientMoveRgd;
+        private static RGD_Slot[] _clientMoveSlots;
+        private static Paint _clientMovePaint;
+        private static string _clientMoveText;
+        private static Vector3 _clientMovePos;
+        private static bool _clientMoveRestored;
         private static Vector3 _syncPos;
         private static Paint _syncPaint;
         private static int _syncDeadlineFrame;
@@ -158,7 +179,9 @@ namespace RaftMovableStorage
         // Per-frame logic, driven by Ticker.
         internal static void Tick()
         {
+            if (Raft_Network.IsHost) PollMoveRequests();
             if (_awaitingClientChest) PollClientChest();
+            if (_awaitingHostMove) PollClientMove();
             if (_hostVerifying) { PollHostVerify(); return; }
 
             if (MoveKey.Value.IsDown())
@@ -393,7 +416,9 @@ namespace RaftMovableStorage
         private static bool CanRestoreDevice(RGD_Block rgd)
             => rgd != null && (OverridesRestoreBlock(rgd.GetType())
                 || rgd is RGD_Cropplot || rgd is RGD_Block_Sprinkler || rgd is RGD_Block_Recycler
-                || rgd is RGD_ResearchTable || rgd is RGD_Reciever || rgd is RGDTrophyHolder);
+                || rgd is RGD_ResearchTable || rgd is RGD_Reciever || rgd is RGDTrophyHolder
+                || rgd is RGD_Sail || rgd is RGD_SteeringWheel || rgd is RGD_MotorWheel
+                || rgd is RGD_AnchorStationary || rgd is RGD_AnchorThrowable);
 
         // Replay captured device state onto the recreated block via the game's own load-path restore
         // methods. Self-restoring subtypes use RestoreBlock; the others keep their save data on a nested
@@ -427,6 +452,26 @@ namespace RaftMovableStorage
                     case RGDTrophyHolder th:
                         var holder = nb.GetComponentInChildren<TrophyHolder>();
                         if (holder != null) th.RestoreTrophyHolder(holder);
+                        break;
+                    case RGD_Sail sa:
+                        var sail = nb.GetComponentInChildren<Sail>();
+                        if (sail != null) sa.RestoreSail(sail);
+                        break;
+                    case RGD_SteeringWheel sw:
+                        var wheel = nb.GetComponentInChildren<SteeringWheel>();
+                        if (wheel != null) wheel.RestoreWheel(sw);
+                        break;
+                    case RGD_MotorWheel mw:
+                        var motor = nb.GetComponentInChildren<MotorWheel>();
+                        if (motor != null) motor.RestoreMotor(mw);   // fuel + throttle/heading settings
+                        break;
+                    case RGD_AnchorStationary asta:
+                        var anchorS = nb.GetComponentInChildren<Anchor_Stationary>();
+                        if (anchorS != null) asta.RestoreAnchor(anchorS);
+                        break;
+                    case RGD_AnchorThrowable ath:
+                        var anchorT = nb.GetComponentInChildren<Anchor_Throwable_Stand>();
+                        if (anchorT != null) ath.RestoreAnchorThrowable(nb, anchorT);
                         break;
                     case RGD_Reciever rcv:
                         // frequency + battery + antenna links. Restore directly NOW (sets frequency and
@@ -822,11 +867,29 @@ namespace RaftMovableStorage
             }
             else
             {
-                // CLIENT: full support is storage-only for now - we locate the replicated block via
-                // StorageManager. Moving other placeables as a client isn't wired yet, so refuse rather
-                // than risk losing remote state. (Host AND single-player move everything.)
+                // CLIENT moving a NON-storage placeable: hand the whole move to the HOST (path a, both
+                // run the mod). The host reads the block's own authoritative state, recreates+restores+
+                // removes the original and replicates it all back. We keep our original hidden until the
+                // host's removal arrives; if the host never acts (busy) we un-hide it - nothing lost.
                 if (!(original is Storage_Small))
-                { Note($"moving '{item.UniqueName}' as a client isn't supported yet - host can move it, or move storages."); AbortKeepOriginal(); return; }
+                {
+                    if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
+                    if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
+                    { Note("couldn't reach the host to move that; left where it was."); AbortKeepOriginal(); return; }
+                    // remember our captured state + snapshot existing blocks so we can find the new one
+                    // and restore it on our own view (host's restore doesn't replicate device state back).
+                    _clientMoveRgd = movingRgd; _clientMoveSlots = movingSlots;
+                    _clientMovePaint = movingPaint; _clientMoveText = movingText;
+                    _clientMovePos = pos; _clientMoveRestored = false;
+                    _preExisting.Clear();
+                    foreach (var b in BlockCreator.GetPlacedBlocks()) if (b != null) _preExisting.Add(b.ObjectIndex);
+                    _pendingClientMoveOriginal = original;
+                    _awaitingHostMove = true;
+                    _clientMoveDeadlineFrame = Time.frameCount + 600; // ~10s failsafe
+                    Note($"client: asked host to move '{item.UniqueName}'; original kept until the host confirms.");
+                    moving = null; movingItem = null; movingSlots = null; ExitBuildMode();
+                    return;
+                }
 
                 // can't create authoritatively, so KEEP the original (hidden) as a safety net, ask the
                 // host to place the new chest, and in PollClientChest remove the original ONLY once the
@@ -866,6 +929,138 @@ namespace RaftMovableStorage
         // HOST place-first verify: wait for the freshly-placed chest to settle to IsStable() (the
         // same-frame check reads stale - see DIAG), then remove the original. A genuinely unsupported
         // spot never settles -> we undo (discard nb, restore original), losing nothing.
+        // CLIENT -> HOST: fire a tiny move request on the private channel. Host derives item + all state
+        // from the original block itself, so we only send {origIndex, target localPos/localEuler, dps}.
+        private static bool SendMoveRequest(Network_Player player, uint origIndex, Vector3 pos, Vector3 rot, DPS dps)
+        {
+            try
+            {
+                var host = player.Network.CurrentSteamHost;
+                if (!host.IsValid()) return false;
+                byte[] data;
+                using (var ms = new MemoryStream())
+                using (var w = new BinaryWriter(ms))
+                {
+                    w.Write(MoveMagic); w.Write((byte)1);
+                    w.Write(origIndex);
+                    w.Write(pos.x); w.Write(pos.y); w.Write(pos.z);
+                    w.Write(rot.x); w.Write(rot.y); w.Write(rot.z);
+                    w.Write((int)dps);
+                    data = ms.ToArray();
+                }
+                return Steamworks.SteamNetworking.SendP2PPacket(host, data, (uint)data.Length,
+                    Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
+            }
+            catch (System.Exception ex) { Log?.LogWarning("send move req: " + ex.Message); return false; }
+        }
+
+        // HOST: drain any client move requests on the private channel.
+        private static void PollMoveRequests()
+        {
+            try
+            {
+                while (Steamworks.SteamNetworking.IsP2PPacketAvailable(out uint size, MoveChannel))
+                {
+                    var buf = new byte[size];
+                    if (!Steamworks.SteamNetworking.ReadP2PPacket(buf, size, out uint _, out Steamworks.CSteamID _, MoveChannel)) break;
+                    HandleMoveRequest(buf);
+                }
+            }
+            catch (System.Exception ex) { Log?.LogWarning("move req poll: " + ex.Message); }
+        }
+
+        // HOST: a client asked us to move a block. Capture its authoritative state and run the SAME
+        // place-first verify pipeline the host uses for its own moves (ApplyState + group move + remove
+        // original, all replicated). If we're mid-move, ignore - the client times out and un-hides.
+        private static void HandleMoveRequest(byte[] buf)
+        {
+            if (_hostVerifying || moving != null) return;
+            uint origIndex; Vector3 pos, rot; DPS dps;
+            try
+            {
+                using var r = new BinaryReader(new MemoryStream(buf));
+                if (r.ReadUInt32() != MoveMagic || r.ReadByte() != 1) return;
+                origIndex = r.ReadUInt32();
+                pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                rot = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                dps = (DPS)r.ReadInt32();
+            }
+            catch { return; }
+
+            var original = BlockCreator.GetBlockByObjectIndex(origIndex);
+            if (original == null) return;
+            var item = original.buildableItem;
+            if (item == null) return;
+            var player = ComponentManager<Network_Player>.Value;
+            var bc = player?.BlockCreator;
+            if (bc == null) return;
+
+            // authoritative capture from the original block (host owns the real state)
+            var slots = (original is Storage_Small st && st.GetInventoryReference() != null)
+                ? st.GetInventoryReference().GetRGDSlots() : null;
+            var paint = CapturePaint(original);
+            var text = TryGetSignText(original);
+            var rgd = TryCaptureRgd(original);
+
+            // hide the original like a carry: colliders off (so the new block's stability + the group
+            // cascade detection judge it as if the original were gone) + renderers/canvases off.
+            _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
+            foreach (var c in original.GetComponentsInChildren<Collider>())
+                if (c.enabled) { c.enabled = false; _hiddenColliders.Add(c); }
+            HideVisual(original);
+
+            Block nb;
+            try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
+            catch (System.Exception ex) { Log?.LogWarning("client-move create: " + ex.Message); RestoreHidden(); return; }
+            if (nb == null) { RestoreHidden(); return; }
+
+            _hostNb = nb; _hostOriginal = original; _hostSlots = slots; _hostText = text; _hostRgd = rgd; _hostPaint = paint;
+            _hostVerifyStart = Time.frameCount; _hostVerifyDeadline = Time.frameCount + 120;
+            _hostLastLoggedStable = -1; _hostVerifying = true;
+            Trace($"client-requested move: verifying nb@{nb.transform.localPosition.ToString("F2")}");
+        }
+
+        // CLIENT: after asking the host to move, watch our (hidden) original. The host's removal
+        // replicates -> the reference goes null = success. Timeout -> host didn't act, un-hide it.
+        private static void PollClientMove()
+        {
+            // restore OUR local view of the moved block once the host's replica arrives + settles
+            // (the host's own restore + the world-save are already correct; this is just our screen).
+            if (!_clientMoveRestored)
+            {
+                Block best = null; float bestSqr = 1f; // within ~1 unit of where we placed the ghost
+                foreach (var b in BlockCreator.GetPlacedBlocks())
+                {
+                    if (b == null || _preExisting.Contains(b.ObjectIndex)) continue;
+                    float d = (b.transform.localPosition - _clientMovePos).sqrMagnitude;
+                    if (d < bestSqr) { bestSqr = d; best = b; }
+                }
+                if (best != null && best.IsStable())
+                {
+                    var player = ComponentManager<Network_Player>.Value;
+                    try { ApplyState(best, _clientMoveSlots, _clientMoveRgd, _clientMovePaint, _clientMoveText, player); }
+                    catch (System.Exception ex) { Log?.LogWarning("client local restore: " + ex.Message); }
+                    _clientMoveRestored = true;
+                }
+            }
+
+            if (_pendingClientMoveOriginal == null)
+            {
+                _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
+                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                _awaitingHostMove = false;
+                Note("client: host moved it.");
+                return;
+            }
+            if (Time.frameCount > _clientMoveDeadlineFrame)
+            {
+                RestoreHidden();
+                _pendingClientMoveOriginal = null; _awaitingHostMove = false;
+                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                Note("client: host didn't move it in time; left where it was.");
+            }
+        }
+
         private static void PollHostVerify()
         {
             if (_hostNb == null)
