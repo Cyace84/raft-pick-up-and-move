@@ -148,7 +148,7 @@ namespace RaftMovableStorage
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Note($"{Info.Metadata.Name} {Info.Metadata.Version} loaded. Move key = {MoveKey.Value}.");
+            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build cropfix4) loaded. Move key = {MoveKey.Value}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
@@ -187,6 +187,13 @@ namespace RaftMovableStorage
             if (MoveKey.Value.IsDown())
             {
                 if (moving != null) CancelMove();
+                // Don't start a new move while the previous one is still resolving: the hide-bookkeeping
+                // (_hidden* lists) and the single pending-original fields are shared, so overlapping moves
+                // corrupt them - the prior original loses its restore info (stays invisible on the client)
+                // or its removal reference (never removed => duplicate). Moves are near-instant when they
+                // work, and every pending state self-resolves on a <=10s timeout, so this never locks up.
+                else if (_awaitingClientChest || _awaitingHostMove || _hostVerifying)
+                    Note("finishing the previous move - try again in a moment.");
                 else TryBeginMove();
                 return;
             }
@@ -420,6 +427,36 @@ namespace RaftMovableStorage
                 || rgd is RGD_Sail || rgd is RGD_SteeringWheel || rgd is RGD_MotorWheel
                 || rgd is RGD_AnchorStationary || rgd is RGD_AnchorThrowable);
 
+        // Deregister the networkIDs of every plant on a block's cropplot(s) BEFORE the block is
+        // removed. Nothing in the game does this on block destruction (MonoBehaviour_ID.OnDestroy is
+        // empty; RemovePickupItem runs only on the pickup path), so destroyed plants leave fake-null
+        // entries in NetworkIDManager under the SAME ObjectIndex the restored plants re-use.
+        // GetNetworkIDFromObjectIndex returns the FIRST index match, and the caller's '!= null' gate
+        // is Unity's overloaded operator - a dead entry shadows the live plant and harvest silently
+        // breaks. The HOST performs exactly that lookup when a CLIENT harvests (Message_HarvestPlant),
+        // so the host bucket must hold only live entries.
+        private static void DeregisterCropplotPlants(Block b)
+        {
+            if (b == null) return;
+            try
+            {
+                var plots = b.GetComponentsInChildren<Cropplot>(true);
+                if (plots == null) return;
+                int removed = 0;
+                foreach (var plot in plots)
+                {
+                    if (plot == null || plot.plantationSlots == null) continue;
+                    foreach (var slot in plot.plantationSlots)
+                    {
+                        var nid = slot?.plant?.pickupComponent?.networkID;
+                        if (nid != null) { NetworkIDManager.RemoveNetworkID(nid, typeof(PickupItem_Networked)); removed++; }
+                    }
+                }
+                if (removed > 0) Log?.LogInfo($"[cropdiag] dereg {removed} plant networkID(s) before removing block #{b.ObjectIndex}");
+            }
+            catch (System.Exception ex) { Log?.LogWarning("[cropdiag] dereg " + ex.Message); }
+        }
+
         // Replay captured device state onto the recreated block via the game's own load-path restore
         // methods. Self-restoring subtypes use RestoreBlock; the others keep their save data on a nested
         // RGD reached through a dedicated restore call (these don't override RestoreBlock). All host-local
@@ -435,7 +472,74 @@ namespace RaftMovableStorage
                     case RGD_Cropplot rc:
                         var plot = nb.GetComponent<Cropplot>();
                         var pm = ComponentManager<Network_Player>.Value?.PlantManager;
-                        if (plot != null && pm != null) rc.RestoreCropplot(plot, pm);
+                        if (plot != null && pm != null)
+                        {
+                            // [cropdiag] preconditions PlantSeed checks (IsFull / prefab lookup / slot list)
+                            try
+                            {
+                                int slotCount = plot.plantationSlots?.Count ?? -1;
+                                Log?.LogInfo($"[cropdiag] pre host={Raft_Network.IsHost} isFull={plot.IsFull} slots={slotCount}");
+                                if (rc.plantationSlots != null)
+                                    foreach (var ps in rc.plantationSlots)
+                                    {
+                                        if (ps == null || ps.uniquePlantIndex == -1) continue;
+                                        bool prefabOk = pm.GetPlantByIndex(ps.uniquePlantIndex) != null;
+                                        bool slotOk = ps.plantationSlotIndex >= 0 && ps.plantationSlotIndex < slotCount;
+                                        Log?.LogInfo($"[cropdiag] pre slot={ps.plantationSlotIndex} plantIdx={ps.uniquePlantIndex} prefabOk={prefabOk} slotOk={slotOk} grow={ps.growTimer}");
+                                    }
+                            }
+                            catch (System.Exception ex) { Log?.LogWarning("[cropdiag] pre " + ex.Message); }
+
+                            rc.RestoreCropplot(plot, pm);
+
+                            // Harvest resolves plants by index: PlantManager.Deserialize(HarvestPlant) ->
+                            // NetworkIDManager.GetNetworkIDFromObjectIndex<PickupItem_Networked>(idx), and the
+                            // '!= null' gate there is Unity's overloaded operator. Nothing deregisters a plant
+                            // when its block is destroyed (MonoBehaviour_ID.OnDestroy is empty; RemovePickupItem
+                            // runs only on the pickup path), so the DESTROYED original plant keeps a stale entry
+                            // under the SAME ObjectIndex. GetNetworkIDFromObjectIndex returns the FIRST index
+                            // match - if that's the destroyed one, it's Unity-fake-null and harvest silently
+                            // breaks. Fix: purge DEAD entries with our index from the PickupItem_Networked
+                            // bucket (live ones - e.g. the hidden original pre-removal on the host - are kept:
+                            // an undone move must not deregister a surviving original), then register ours.
+                            try
+                            {
+                                var dictField = typeof(NetworkIDManager).GetField("networkIDs",
+                                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                                var byTag = (dictField?.GetValue(null) as System.Collections.IDictionary)
+                                    ?[typeof(PickupItem_Networked)] as System.Collections.IDictionary;
+                                if (rc.plantationSlots != null)
+                                    foreach (var ps in rc.plantationSlots)
+                                    {
+                                        if (ps == null || ps.uniquePlantIndex == -1) continue;
+                                        Plant placed = (ps.plantationSlotIndex >= 0 && ps.plantationSlotIndex < (plot.plantationSlots?.Count ?? 0))
+                                            ? plot.plantationSlots[ps.plantationSlotIndex].plant : null;
+                                        var nid = placed?.pickupComponent?.networkID;
+                                        if (nid == null) { Log?.LogWarning($"[cropdiag] fix slot={ps.plantationSlotIndex} no plant/networkID"); continue; }
+                                        uint want = ps.plantObjectIndex;
+                                        int dupAlive = 0, dupDead = 0, purged = 0;
+                                        if (byTag != null)
+                                        {
+                                            var stale = new List<MonoBehaviour_ID_Network>();
+                                            foreach (System.Collections.DictionaryEntry de in byTag)
+                                                foreach (MonoBehaviour_ID_Network item in (System.Collections.IEnumerable)de.Value)
+                                                {
+                                                    if (object.ReferenceEquals(item, nid) || item.ObjectIndex != want) continue;
+                                                    if (item == null) { dupDead++; stale.Add(item); } // Unity-fake-null: destroyed shadow
+                                                    else dupAlive++;                                  // live duplicate: keep (hidden original)
+                                                }
+                                            foreach (var s in stale) { NetworkIDManager.RemoveNetworkID(s, typeof(PickupItem_Networked)); purged++; }
+                                        }
+                                        NetworkIDManager.AddNetworkID(nid); // idempotent - HashSet add
+                                        var gen = NetworkIDManager.GetNetworkIDFromObjectIndex<PickupItem_Networked>(want);
+                                        bool genFound = (object)gen != null;   // present in bucket (even if destroyed)
+                                        bool genAlive = gen != null;           // Unity-alive
+                                        bool genOurs = object.ReferenceEquals(gen, nid);
+                                        Log?.LogInfo($"[cropdiag] fix3 slot={ps.plantationSlotIndex} want={want} nidIdx={nid.ObjectIndex} nidType={nid.GetType().Name} dupAlive={dupAlive} dupDead={dupDead} purged={purged} genFound={genFound} genAlive={genAlive} genOurs={genOurs}");
+                                    }
+                            }
+                            catch (System.Exception ex) { Log?.LogWarning("[cropdiag] fix " + ex.Message); }
+                        }
                         break;
                     case RGD_Block_Sprinkler rs:
                         var spr = nb.GetComponent<Sprinkler>();
@@ -689,7 +793,7 @@ namespace RaftMovableStorage
 
         private static void DiscardNewDependents()
         {
-            foreach (var d in _newDependents) if (d != null) { try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
+            foreach (var d in _newDependents) if (d != null) { DeregisterCropplotPlants(d); try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
             _newDependents.Clear(); _depOriginals.Clear();
         }
 
@@ -784,13 +888,26 @@ namespace RaftMovableStorage
             ClearCarry();
         }
 
-        // Fully leave build mode so the player can't keep placing extra copies (BUG3).
+        // Leave build mode WITHOUT placing extra copies (BUG3), the vanilla way: clear the selected
+        // buildable + destroy the ghost. With selectedBlock null, BlockCreator.Update early-returns
+        // before any placement, so LMB can't spawn another copy.
+        // CRITICAL: never SetActive(false) the BlockCreator GameObject. Vanilla keeps it ALWAYS active -
+        // its Update both drives the build-menu prompt and resets isRotating. Deactivating it froze
+        // isRotating=true, and Hotbar gates number-key slot selection on BlockCreator.IsRotating, so the
+        // hotbar got stuck on one slot until an inventory action (observed: Hotbar.Update line 366).
         private static void ExitBuildMode()
         {
             var bc = ComponentManager<Network_Player>.Value?.BlockCreator;
             if (bc == null) return;
+            var t = Traverse.Create(bc);
+            try
+            {
+                t.Field("selectedBuildableItem").SetValue(null);
+                t.Field("isRotating").SetValue(false);
+                t.Method("DestroyGhostBlock").GetValue();
+            }
+            catch (System.Exception ex) { Log?.LogWarning("exit build: " + ex.Message); }
             bc.SetGhostBlockVisibility(false);
-            bc.gameObject.SetActive(false);
         }
 
         // Read the vanilla ghost, remove the original, recreate at the new spot, restore inventory.
@@ -954,7 +1071,12 @@ namespace RaftMovableStorage
             catch (System.Exception ex) { Log?.LogWarning("send move req: " + ex.Message); return false; }
         }
 
-        // HOST: drain any client move requests on the private channel.
+        private static readonly Queue<byte[]> _moveReqQueue = new Queue<byte[]>();
+
+        // HOST: always drain the socket (so packets don't pile up in Steam's buffer), but run only ONE
+        // move at a time - each kicks off the place-first verify pipeline. A request that arrives while
+        // we're mid-move is QUEUED, not dropped (dropping was the cause of the "client move lagged /
+        // didn't land" when moving blocks in quick succession).
         private static void PollMoveRequests()
         {
             try
@@ -963,18 +1085,20 @@ namespace RaftMovableStorage
                 {
                     var buf = new byte[size];
                     if (!Steamworks.SteamNetworking.ReadP2PPacket(buf, size, out uint _, out Steamworks.CSteamID _, MoveChannel)) break;
-                    HandleMoveRequest(buf);
+                    _moveReqQueue.Enqueue(buf);
                 }
             }
             catch (System.Exception ex) { Log?.LogWarning("move req poll: " + ex.Message); }
+
+            if (!_hostVerifying && moving == null && _moveReqQueue.Count > 0)
+                HandleMoveRequest(_moveReqQueue.Dequeue());
         }
 
         // HOST: a client asked us to move a block. Capture its authoritative state and run the SAME
         // place-first verify pipeline the host uses for its own moves (ApplyState + group move + remove
-        // original, all replicated). If we're mid-move, ignore - the client times out and un-hides.
+        // original, all replicated). Caller (PollMoveRequests) guarantees we aren't already mid-move.
         private static void HandleMoveRequest(byte[] buf)
         {
-            if (_hostVerifying || moving != null) return;
             uint origIndex; Vector3 pos, rot; DPS dps;
             try
             {
@@ -1014,6 +1138,11 @@ namespace RaftMovableStorage
             catch (System.Exception ex) { Log?.LogWarning("client-move create: " + ex.Message); RestoreHidden(); return; }
             if (nb == null) { RestoreHidden(); return; }
 
+            // [diag] compare what the client asked for against what we actually built - a recycler is
+            // multi-cell so a small pos/rot/dps divergence makes its stability gizmos miss support.
+            Log?.LogInfo($"[diag] move '{item.UniqueName}': recv pos={pos.ToString("F3")} euler={rot.ToString("F3")} dps={dps}"
+                + $" -> built pos={nb.transform.localPosition.ToString("F3")} euler={nb.transform.localEulerAngles.ToString("F3")} dps={nb.dpsType}");
+
             _hostNb = nb; _hostOriginal = original; _hostSlots = slots; _hostText = text; _hostRgd = rgd; _hostPaint = paint;
             _hostVerifyStart = Time.frameCount; _hostVerifyDeadline = Time.frameCount + 120;
             _hostLastLoggedStable = -1; _hostVerifying = true;
@@ -1024,8 +1153,26 @@ namespace RaftMovableStorage
         // replicates -> the reference goes null = success. Timeout -> host didn't act, un-hide it.
         private static void PollClientMove()
         {
-            // restore OUR local view of the moved block once the host's replica arrives + settles
-            // (the host's own restore + the world-save are already correct; this is just our screen).
+            // PHASE 1: wait for the host to REMOVE the original before we restore our own view. Some
+            // devices (cropplot) recreate networked sub-objects (plants) under the SAME object index as
+            // the original; if we recreate them while the original still exists, the two race and the
+            // original's removal can orphan our copy (plant becomes un-harvestable). The host removes
+            // first, so mirroring that order - restore only AFTER the original is gone - keeps our copy
+            // the sole holder of that index, exactly like the host ends up.
+            if (_pendingClientMoveOriginal != null)
+            {
+                if (Time.frameCount > _clientMoveDeadlineFrame)
+                {
+                    RestoreHidden();
+                    _pendingClientMoveOriginal = null; _awaitingHostMove = false;
+                    _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                    Note("client: host didn't move it in time; left where it was.");
+                }
+                return;
+            }
+
+            // PHASE 2: original is gone - find the freshly-replicated block near where we placed the ghost
+            // and restore our local view on it.
             if (!_clientMoveRestored)
             {
                 Block best = null; float bestSqr = 1f; // within ~1 unit of where we placed the ghost
@@ -1042,23 +1189,16 @@ namespace RaftMovableStorage
                     catch (System.Exception ex) { Log?.LogWarning("client local restore: " + ex.Message); }
                     _clientMoveRestored = true;
                 }
+                else if (Time.frameCount <= _clientMoveDeadlineFrame + 180)
+                {
+                    return; // grace: give the new block a moment to arrive/settle
+                }
             }
 
-            if (_pendingClientMoveOriginal == null)
-            {
-                _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
-                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                _awaitingHostMove = false;
-                Note("client: host moved it.");
-                return;
-            }
-            if (Time.frameCount > _clientMoveDeadlineFrame)
-            {
-                RestoreHidden();
-                _pendingClientMoveOriginal = null; _awaitingHostMove = false;
-                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                Note("client: host didn't move it in time; left where it was.");
-            }
+            _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
+            _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+            _awaitingHostMove = false;
+            Note("client: host moved it.");
         }
 
         private static void PollHostVerify()
@@ -1099,6 +1239,7 @@ namespace RaftMovableStorage
                 {
                     DiscardNewDependents();
                     RestoreDependentColliders();
+                    DeregisterCropplotPlants(nb); // its restored plants are registered - don't shadow the surviving original
                     try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
                     RestoreHidden();
                     Note(depFail);
@@ -1111,9 +1252,9 @@ namespace RaftMovableStorage
                 _hiddenCanvases.Clear();
                 // remove originals: dependents first (their colliders were disabled during detection),
                 // then the base block - nothing rests on it now, so no cascade victims.
-                foreach (var d in _depOriginals) if (d != null) { try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
+                foreach (var d in _depOriginals) if (d != null) { DeregisterCropplotPlants(d); try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
                 _depOriginals.Clear(); _depColliderDisabled.Clear(); _newDependents.Clear();
-                if (original != null) { try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
+                if (original != null) { DeregisterCropplotPlants(original); try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
 
                 int restored = slots?.Length ?? 0;
                 Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"
@@ -1125,6 +1266,7 @@ namespace RaftMovableStorage
 
             if (Time.frameCount > _hostVerifyDeadline)
             {
+                DeregisterCropplotPlants(_hostNb); // undo path: the new block's registered plants must not shadow the original
                 try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
                 RestoreHidden();
                 Note("can't place there - it never became supported (+" + delta + "f). Block left where it was.");
