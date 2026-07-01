@@ -102,6 +102,12 @@ namespace RaftMovableStorage
         private static string _clientMoveText;
         private static Vector3 _clientMovePos;
         private static bool _clientMoveRestored;
+        // [t] timing probes (OPEN BUG: ~5s first-move-of-type delay) + refusal-relay state
+        private static float _cmSentTime;          // Time.realtimeSinceStartup when the request left
+        private static bool _cmOrigGoneLogged;
+        private static bool _cmSeenLogged;
+        private static Steamworks.CSteamID _hostReqSender; // valid = current verify is a client request
+        private static float _hostReqRecvTime;
         private static Vector3 _syncPos;
         private static Paint _syncPaint;
         private static int _syncDeadlineFrame;
@@ -148,7 +154,7 @@ namespace RaftMovableStorage
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build cropfix4) loaded. Move key = {MoveKey.Value}.");
+            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build cropfix5) loaded. Move key = {MoveKey.Value}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
@@ -179,7 +185,7 @@ namespace RaftMovableStorage
         // Per-frame logic, driven by Ticker.
         internal static void Tick()
         {
-            if (Raft_Network.IsHost) PollMoveRequests();
+            if (Raft_Network.IsHost) PollMoveRequests(); else PollMoveRefusals();
             if (_awaitingClientChest) PollClientChest();
             if (_awaitingHostMove) PollClientMove();
             if (_hostVerifying) { PollHostVerify(); return; }
@@ -993,6 +999,7 @@ namespace RaftMovableStorage
                     if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
                     { Note("couldn't reach the host to move that; left where it was."); AbortKeepOriginal(); return; }
+                    _cmSentTime = Time.realtimeSinceStartup; _cmOrigGoneLogged = false; _cmSeenLogged = false;
                     // remember our captured state + snapshot existing blocks so we can find the new one
                     // and restore it on our own view (host's restore doesn't replicate device state back).
                     _clientMoveRgd = movingRgd; _clientMoveSlots = movingSlots;
@@ -1022,6 +1029,7 @@ namespace RaftMovableStorage
                     Messages.BlockCreator_PlaceBlock, bc, item.UniqueIndex,
                     0u, 0u, 0u, pos, rot, -1, dps);
                 player.SendP2P(req, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                _cmSentTime = Time.realtimeSinceStartup; _cmSeenLogged = false;
 
                 _syncSlots = slots;
                 _syncPos = pos;
@@ -1071,7 +1079,61 @@ namespace RaftMovableStorage
             catch (System.Exception ex) { Log?.LogWarning("send move req: " + ex.Message); return false; }
         }
 
-        private static readonly Queue<byte[]> _moveReqQueue = new Queue<byte[]>();
+        // HOST -> CLIENT: tell the requester WHY a move was declined so it can restore its original
+        // immediately with the real reason instead of sitting out the generic 10s failsafe (observed:
+        // recycler "snap back" was two legit host refusals the client never learned about).
+        private static void SendMoveRefusal(Steamworks.CSteamID to, uint origIndex, string reason)
+        {
+            if (!to.IsValid()) return;
+            try
+            {
+                byte[] data;
+                using (var ms = new MemoryStream())
+                using (var w = new BinaryWriter(ms))
+                {
+                    w.Write(MoveMagic); w.Write((byte)2);
+                    w.Write(origIndex);
+                    w.Write(reason ?? "");
+                    data = ms.ToArray();
+                }
+                Steamworks.SteamNetworking.SendP2PPacket(to, data, (uint)data.Length,
+                    Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
+            }
+            catch (System.Exception ex) { Log?.LogWarning("send refusal: " + ex.Message); }
+        }
+
+        // CLIENT: drain refusal packets from the host (type 2 on the private channel).
+        private static void PollMoveRefusals()
+        {
+            try
+            {
+                while (Steamworks.SteamNetworking.IsP2PPacketAvailable(out uint size, MoveChannel))
+                {
+                    var buf = new byte[size];
+                    if (!Steamworks.SteamNetworking.ReadP2PPacket(buf, size, out uint _, out Steamworks.CSteamID _, MoveChannel)) break;
+                    try
+                    {
+                        using var r = new BinaryReader(new MemoryStream(buf));
+                        if (r.ReadUInt32() != MoveMagic || r.ReadByte() != 2) continue;
+                        uint origIndex = r.ReadUInt32();
+                        string reason = r.ReadString();
+                        if (_awaitingHostMove && _pendingClientMoveOriginal != null
+                            && _pendingClientMoveOriginal.ObjectIndex == origIndex)
+                        {
+                            RestoreHidden();
+                            _pendingClientMoveOriginal = null; _awaitingHostMove = false;
+                            _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                            Note("client: host declined - " + reason);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch (System.Exception ex) { Log?.LogWarning("refusal poll: " + ex.Message); }
+        }
+
+        private sealed class MoveReq { public byte[] Buf; public Steamworks.CSteamID Sender; public float RecvTime; }
+        private static readonly Queue<MoveReq> _moveReqQueue = new Queue<MoveReq>();
 
         // HOST: always drain the socket (so packets don't pile up in Steam's buffer), but run only ONE
         // move at a time - each kicks off the place-first verify pipeline. A request that arrives while
@@ -1084,21 +1146,24 @@ namespace RaftMovableStorage
                 while (Steamworks.SteamNetworking.IsP2PPacketAvailable(out uint size, MoveChannel))
                 {
                     var buf = new byte[size];
-                    if (!Steamworks.SteamNetworking.ReadP2PPacket(buf, size, out uint _, out Steamworks.CSteamID _, MoveChannel)) break;
-                    _moveReqQueue.Enqueue(buf);
+                    if (!Steamworks.SteamNetworking.ReadP2PPacket(buf, size, out uint _, out Steamworks.CSteamID sender, MoveChannel)) break;
+                    _moveReqQueue.Enqueue(new MoveReq { Buf = buf, Sender = sender, RecvTime = Time.realtimeSinceStartup });
                 }
             }
             catch (System.Exception ex) { Log?.LogWarning("move req poll: " + ex.Message); }
 
             if (!_hostVerifying && moving == null && _moveReqQueue.Count > 0)
                 HandleMoveRequest(_moveReqQueue.Dequeue());
+            else if (_moveReqQueue.Count > 0 && Time.frameCount % 300 == 0)
+                Log?.LogInfo($"[t] {_moveReqQueue.Count} move request(s) queued behind the current move");
         }
 
         // HOST: a client asked us to move a block. Capture its authoritative state and run the SAME
         // place-first verify pipeline the host uses for its own moves (ApplyState + group move + remove
         // original, all replicated). Caller (PollMoveRequests) guarantees we aren't already mid-move.
-        private static void HandleMoveRequest(byte[] buf)
+        private static void HandleMoveRequest(MoveReq req)
         {
+            var buf = req.Buf;
             uint origIndex; Vector3 pos, rot; DPS dps;
             try
             {
@@ -1112,12 +1177,12 @@ namespace RaftMovableStorage
             catch { return; }
 
             var original = BlockCreator.GetBlockByObjectIndex(origIndex);
-            if (original == null) return;
+            if (original == null) { SendMoveRefusal(req.Sender, origIndex, "the host couldn't find that block."); return; }
             var item = original.buildableItem;
-            if (item == null) return;
+            if (item == null) { SendMoveRefusal(req.Sender, origIndex, "that block has no buildable item on the host."); return; }
             var player = ComponentManager<Network_Player>.Value;
             var bc = player?.BlockCreator;
-            if (bc == null) return;
+            if (bc == null) { SendMoveRefusal(req.Sender, origIndex, "host is not ready (no BlockCreator)."); return; }
 
             // authoritative capture from the original block (host owns the real state)
             var slots = (original is Storage_Small st && st.GetInventoryReference() != null)
@@ -1134,9 +1199,23 @@ namespace RaftMovableStorage
             HideVisual(original);
 
             Block nb;
+            float tCreate = Time.realtimeSinceStartup;
             try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
-            catch (System.Exception ex) { Log?.LogWarning("client-move create: " + ex.Message); RestoreHidden(); return; }
-            if (nb == null) { RestoreHidden(); return; }
+            catch (System.Exception ex)
+            {
+                Log?.LogWarning("client-move create: " + ex.Message); RestoreHidden();
+                SendMoveRefusal(req.Sender, origIndex, "the host couldn't create the block there.");
+                return;
+            }
+            if (nb == null)
+            {
+                RestoreHidden();
+                SendMoveRefusal(req.Sender, origIndex, "the host couldn't create the block there.");
+                return;
+            }
+            // [t] localize the first-move-of-type ~5s: how long the request waited in Steam's buffer/our
+            // queue vs how long the actual instantiate took (per-type first-use asset warm-up suspect).
+            Log?.LogInfo($"[t] req '{item.UniqueName}': queue={tCreate - req.RecvTime:F2}s create={Time.realtimeSinceStartup - tCreate:F2}s");
 
             // [diag] compare what the client asked for against what we actually built - a recycler is
             // multi-cell so a small pos/rot/dps divergence makes its stability gizmos miss support.
@@ -1144,6 +1223,7 @@ namespace RaftMovableStorage
                 + $" -> built pos={nb.transform.localPosition.ToString("F3")} euler={nb.transform.localEulerAngles.ToString("F3")} dps={nb.dpsType}");
 
             _hostNb = nb; _hostOriginal = original; _hostSlots = slots; _hostText = text; _hostRgd = rgd; _hostPaint = paint;
+            _hostReqSender = req.Sender; _hostReqRecvTime = req.RecvTime;
             _hostVerifyStart = Time.frameCount; _hostVerifyDeadline = Time.frameCount + 120;
             _hostLastLoggedStable = -1; _hostVerifying = true;
             Trace($"client-requested move: verifying nb@{nb.transform.localPosition.ToString("F2")}");
@@ -1175,6 +1255,7 @@ namespace RaftMovableStorage
             // and restore our local view on it.
             if (!_clientMoveRestored)
             {
+                if (!_cmOrigGoneLogged) { Log?.LogInfo($"[t] original removed {Time.realtimeSinceStartup - _cmSentTime:F2}s after request"); _cmOrigGoneLogged = true; }
                 Block best = null; float bestSqr = 1f; // within ~1 unit of where we placed the ghost
                 foreach (var b in BlockCreator.GetPlacedBlocks())
                 {
@@ -1182,6 +1263,7 @@ namespace RaftMovableStorage
                     float d = (b.transform.localPosition - _clientMovePos).sqrMagnitude;
                     if (d < bestSqr) { bestSqr = d; best = b; }
                 }
+                if (best != null && !_cmSeenLogged) { Log?.LogInfo($"[t] new block first seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request (stable={best.IsStable()})"); _cmSeenLogged = true; }
                 if (best != null && best.IsStable())
                 {
                     var player = ComponentManager<Network_Player>.Value;
@@ -1198,6 +1280,7 @@ namespace RaftMovableStorage
             _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
             _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
             _awaitingHostMove = false;
+            Log?.LogInfo($"[t] client move total {Time.realtimeSinceStartup - _cmSentTime:F2}s (request -> restored)");
             Note("client: host moved it.");
         }
 
@@ -1206,7 +1289,8 @@ namespace RaftMovableStorage
             if (_hostNb == null)
             {
                 RestoreHidden();
-                _hostVerifying = false; _hostOriginal = null; _hostSlots = null;
+                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "the placed block vanished before settling; original kept.");
+                _hostVerifying = false; _hostOriginal = null; _hostSlots = null; _hostReqSender = default;
                 Log?.LogWarning("host verify: placed chest vanished before settling; original restored, nothing lost.");
                 return;
             }
@@ -1243,7 +1327,8 @@ namespace RaftMovableStorage
                     try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
                     RestoreHidden();
                     Note(depFail);
-                    _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null;
+                    if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, depFail);
+                    _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
                     return;
                 }
 
@@ -1260,7 +1345,8 @@ namespace RaftMovableStorage
                 Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"
                     + (restored > 0 ? $"; restored {restored} slots" : "")
                     + (_depMovedCount > 0 ? $"; moved {_depMovedCount} on top" : ""));
-                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null;
+                if (_hostReqSender.IsValid()) Log?.LogInfo($"[t] client move total {Time.realtimeSinceStartup - _hostReqRecvTime:F2}s (recv -> original removed)");
+                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
                 return;
             }
 
@@ -1270,7 +1356,8 @@ namespace RaftMovableStorage
                 try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
                 RestoreHidden();
                 Note("can't place there - it never became supported (+" + delta + "f). Block left where it was.");
-                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null;
+                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "that spot never became supported; block left where it was.");
+                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
             }
         }
 
@@ -1295,6 +1382,7 @@ namespace RaftMovableStorage
                 if (d < bestSqr) { bestSqr = d; best = s; }
             }
             if (best == null) return; // host's reply hasn't spawned it yet
+            if (!_cmSeenLogged) { Log?.LogInfo($"[t] chest first seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request"); _cmSeenLogged = true; }
 
             var player = ComponentManager<Network_Player>.Value;
             if (player?.Network == null) { RestoreHidden(); _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null; return; }
