@@ -125,7 +125,9 @@ namespace RaftMovableStorage
         private static string _hostText;
         private static RGD_Block _hostRgd;
         private static int _hostVerifyStart;
-        private static int _hostVerifyDeadline;
+        private static float _hostVerifyDeadlineTime; // WALL-CLOCK deadline: frame-based (120f) was ~2s@60fps
+        // but 4s@30fps (CrossOver host), and the recycler settles at ~119-121f - exactly ON the frame
+        // deadline (observed: '+121f' fail vs 4.01s success on identical moves).
         private static int _hostLastLoggedStable; // -1 unknown, 0 false, 1 true (log only on change)
         private static Paint _hostPaint;
         private Harmony _harmony;
@@ -154,7 +156,7 @@ namespace RaftMovableStorage
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build cropfix6) loaded. Move key = {MoveKey.Value}.");
+            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build cropfix7) loaded. Move key = {MoveKey.Value}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
@@ -715,9 +717,12 @@ namespace RaftMovableStorage
                     try
                     {
                         var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
-                        player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                        if (Raft_Network.IsHost)
+                            player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                        else
+                            player.SendP2P(sync, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game); // client -> host, like the old storage path
                     }
-                    catch (System.Exception ex) { Log?.LogWarning("host content-sync RPC failed: " + ex.Message); }
+                    catch (System.Exception ex) { Log?.LogWarning("content-sync send failed: " + ex.Message); }
                 }
             }
             ApplyDeviceState(rgd, nb);
@@ -1018,7 +1023,7 @@ namespace RaftMovableStorage
                 _hostRgd = movingRgd;
                 _hostPaint = movingPaint;
                 _hostVerifyStart = Time.frameCount;
-                _hostVerifyDeadline = Time.frameCount + 120; // ~2s @60fps for physics to settle
+                _hostVerifyDeadlineTime = Time.realtimeSinceStartup + 6f; // wall-clock; slow settlers (recycler ~4s) fit
                 _hostLastLoggedStable = -1;
                 _hostVerifying = true;
                 Trace($"placing nb@{nb.transform.localPosition.ToString("F2")}; verifying support...");
@@ -1031,11 +1036,13 @@ namespace RaftMovableStorage
             }
             else
             {
-                // CLIENT moving a NON-storage placeable: hand the whole move to the HOST (path a, both
-                // run the mod). The host reads the block's own authoritative state, recreates+restores+
-                // removes the original and replicates it all back. We keep our original hidden until the
-                // host's removal arrives; if the host never acts (busy) we un-hide it - nothing lost.
-                if (!(original is Storage_Small))
+                // CLIENT: hand the whole move to the HOST (path a, both run the mod) - STORAGES INCLUDED.
+                // The legacy storage path (vanilla Message_BlockCreator_PlaceBlock) is gone: the host
+                // validated that placement against the ORIGINAL chest still standing there with colliders
+                // ON, so any move shorter than the chest's own footprint was silently rejected -> 10s
+                // timeout -> "snap back" (observed 02/07: short chest moves fail, >=chest-size moves ok).
+                // The move-request path hides the original's colliders on the host and places via
+                // CreateBlockCheat, so short-distance moves work like they do for devices.
                 {
                     if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
@@ -1056,35 +1063,6 @@ namespace RaftMovableStorage
                     return;
                 }
 
-                // can't create authoritatively, so KEEP the original (hidden) as a safety net, ask the
-                // host to place the new chest, and in PollClientChest remove the original ONLY once the
-                // replicated chest is confirmed stable. Unstable/timeout -> restore original.
-                if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
-
-                _preExisting.Clear();
-                if (StorageManager.allStorages != null)
-                    foreach (var s in StorageManager.allStorages)
-                        if (s != null) _preExisting.Add(s.ObjectIndex);
-
-                var req = new Message_BlockCreator_PlaceBlock(
-                    Messages.BlockCreator_PlaceBlock, bc, item.UniqueIndex,
-                    0u, 0u, 0u, pos, rot, -1, dps);
-                player.SendP2P(req, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
-                _cmSentTime = Time.realtimeSinceStartup; _cmSeenLogged = false;
-
-                _syncSlots = slots;
-                _syncPos = pos;
-                _syncPaint = movingPaint;
-                _pendingClientOriginal = original as Storage_Small; // removed ONLY after the new chest is confirmed stable
-                _awaitingClientChest = true;
-                _syncDeadlineFrame = Time.frameCount + 600; // ~10s @60fps
-                Note($"client: asked host to place '{item.UniqueName}'; original kept until the moved chest is confirmed.");
-
-                // leave build mode but KEEP hidden bookkeeping + pending original for the poll
-                moving = null;
-                movingItem = null;
-                movingSlots = null;
-                ExitBuildMode();
             }
         }
 
@@ -1265,7 +1243,7 @@ namespace RaftMovableStorage
 
             _hostNb = nb; _hostOriginal = original; _hostSlots = slots; _hostText = text; _hostRgd = rgd; _hostPaint = paint;
             _hostReqSender = req.Sender; _hostReqRecvTime = req.RecvTime;
-            _hostVerifyStart = Time.frameCount; _hostVerifyDeadline = Time.frameCount + 120;
+            _hostVerifyStart = Time.frameCount; _hostVerifyDeadlineTime = Time.realtimeSinceStartup + 6f;
             _hostLastLoggedStable = -1; _hostVerifying = true;
             Trace($"client-requested move: verifying nb@{nb.transform.localPosition.ToString("F2")}");
         }
@@ -1391,7 +1369,7 @@ namespace RaftMovableStorage
                 return;
             }
 
-            if (Time.frameCount > _hostVerifyDeadline)
+            if (Time.realtimeSinceStartup > _hostVerifyDeadlineTime)
             {
                 DeregisterCropplotPlants(_hostNb); // undo path: the new block's registered plants must not shadow the original
                 try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
