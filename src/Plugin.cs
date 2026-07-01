@@ -154,7 +154,7 @@ namespace RaftMovableStorage
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build cropfix5) loaded. Move key = {MoveKey.Value}.");
+            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build cropfix6) loaded. Move key = {MoveKey.Value}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
@@ -463,6 +463,31 @@ namespace RaftMovableStorage
             catch (System.Exception ex) { Log?.LogWarning("[cropdiag] dereg " + ex.Message); }
         }
 
+        // [stab] dump per-gizmo support for a block that reads !IsStable (multi-cell devices like the
+        // recycler have several gizmo boxes; requireAll means ONE unsupported cell fails the whole block).
+        private static void LogStability(Block b)
+        {
+            if (b == null) return;
+            try
+            {
+                foreach (var sc in b.GetComponentsInChildren<StableComponent>(true))
+                {
+                    int total = sc.requiredGizmoColliders?.Length ?? 0;
+                    int hits = 0;
+                    var miss = new System.Text.StringBuilder();
+                    for (int i = 0; i < total; i++)
+                    {
+                        bool hit = false;
+                        try { hit = sc.requiredGizmoColliders[i].IsColliding(false, LayerMasks.MASK_Block, 0.99f); } catch { }
+                        if (hit) hits++; else { miss.Append(i); miss.Append(' '); }
+                    }
+                    Log?.LogInfo($"[stab] '{b.buildableItem?.UniqueName}' comp '{sc.gameObject.name}': hits={hits}/{total}"
+                        + $" requireAll={sc.requireAll} need={sc.requiredHitCount}" + (miss.Length > 0 ? $" missing: {miss}" : ""));
+                }
+            }
+            catch (System.Exception ex) { Log?.LogWarning("[stab] " + ex.Message); }
+        }
+
         // Replay captured device state onto the recreated block via the game's own load-path restore
         // methods. Self-restoring subtypes use RestoreBlock; the others keep their save data on a nested
         // RGD reached through a dedicated restore call (these don't override RestoreBlock). All host-local
@@ -736,8 +761,24 @@ namespace RaftMovableStorage
                         if (Vector3.Distance(pb.transform.position, hb.transform.position) > dist) continue;
                         if (pb.IsStable()) continue;                       // still supported elsewhere - not ours
                         var pbi = pb.buildableItem;
+                        // [dep] diag: GENUINE dependent (stable again once the original's colliders are
+                        // restored) vs ALREADY unstable before our move (chronic neighbour - suspected
+                        // recycler false-positive: a fence whose gizmo only clips the big collider).
+                        bool preUnstable = false;
+                        try
+                        {
+                            var restored = new System.Collections.Generic.List<Collider>();
+                            foreach (var hc in _hiddenColliders) if (hc != null && !hc.enabled) { hc.enabled = true; restored.Add(hc); }
+                            foreach (var dc in _depColliderDisabled) if (dc != null && !dc.enabled) { dc.enabled = true; restored.Add(dc); }
+                            preUnstable = !pb.IsStable();
+                            foreach (var rc in restored) rc.enabled = false;
+                        }
+                        catch { }
+                        Log?.LogInfo($"[dep] '{(pbi != null ? pbi.UniqueName : pb.name)}' reads unstable near '{(hb.buildableItem != null ? hb.buildableItem.UniqueName : hb.name)}'"
+                            + $" dist={Vector3.Distance(pb.transform.position, hb.transform.position):F2} preUnstable={preUnstable} pos={pb.transform.localPosition.ToString("F2")}");
+                        LogStability(pb);
                         if (pbi?.settings_buildable == null || !pbi.settings_buildable.Placeable || HasUnhandledState(pb))
-                        { failMsg = $"Didn't move - '{(pbi != null ? pbi.UniqueName : "something")}' resting on it has state I can't carry yet."; return false; }
+                        { failMsg = $"Didn't move - '{(pbi != null ? pbi.UniqueName : "something")}' resting on it has state I can't carry yet" + (preUnstable ? " (it was already unsupported before this move)" : "") + "."; return false; }
                         captured.Add(Capture(pb, original));
                         frontier.Add(pb);
                         foreach (var c in pb.GetComponentsInChildren<Collider>())
@@ -1355,6 +1396,7 @@ namespace RaftMovableStorage
                 DeregisterCropplotPlants(_hostNb); // undo path: the new block's registered plants must not shadow the original
                 try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
                 RestoreHidden();
+                LogStability(_hostNb); // which gizmo cell(s) never found support
                 Note("can't place there - it never became supported (+" + delta + "f). Block left where it was.");
                 if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "that spot never became supported; block left where it was.");
                 _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
