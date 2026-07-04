@@ -22,7 +22,7 @@ it simply **refuses to move** rather than risk losing that state. Nothing is eve
 ## Install
 
 1. Install [BepInEx 5](https://docs.bepinex.dev/) (Mono build) for Raft.
-2. Put `RaftMovableStorage.dll` in `Raft/BepInEx/plugins/`.
+2. Put `PickUpMove.dll` in `Raft/BepInEx/plugins/`.
 3. Start the game once so the config file gets written.
 
 ## How to use
@@ -31,7 +31,7 @@ Look at a movable object and press the move key (default `M`). It lifts into pla
 ghost tracks your aim. Left-click to place it. Right-click, or press the key again, to cancel and
 leave it where it was.
 
-Change the key in `BepInEx/config/com.cyace84.raftmovablestorage.cfg`.
+Change the key in `BepInEx/config/com.cyace84.pickupmove.cfg`.
 
 ## Multiplayer
 

@@ -6,7 +6,7 @@ using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
 
-namespace RaftMovableStorage
+namespace PickUpMove
 {
     // Move a placed storage chest (with its contents) to a new spot, using the vanilla build
     // placement ghost as the preview. Press the hotkey while aiming at a storage to pick it up
@@ -42,7 +42,7 @@ namespace RaftMovableStorage
     [BepInPlugin(Guid, "Pick Up & Move", "1.0.0")]
     public class Plugin : BaseUnityPlugin
     {
-        public const string Guid = "com.cyace84.raftmovablestorage";
+        public const string Guid = "com.cyace84.pickupmove";
 
         public static ConfigEntry<KeyboardShortcut> MoveKey;
         public static ConfigEntry<bool> RelayLogs;
@@ -229,7 +229,7 @@ namespace RaftMovableStorage
                 // or its removal reference (never removed => duplicate). Moves are near-instant when they
                 // work, and every pending state self-resolves on a <=10s timeout, so this never locks up.
                 else if (_awaitingClientChest || _awaitingHostMove || _hostVerifying || _tpVerifying)
-                    NoteHud("finishing the previous move - try again in a moment.");
+                    NoteHud("Finishing the previous move. Try again in a moment.");
                 else TryBeginMove();
                 return;
             }
@@ -285,9 +285,9 @@ namespace RaftMovableStorage
             // - A zipline with a rope strung: teleporting one end leaves the rope hanging mid-air
             //   (MeshPath connections don't follow). Detach first, then move. (v2 idea: drag the rope.)
             if (block is Block_DetailPlank)
-            { NoteHud("the detail plank can't be carried (it's stretched between two points) - remove and rebuild it."); return; }
+            { NoteHud("This plank is stretched between two points and can't be carried."); return; }
             if (HasAttachedRope(block))
-            { NoteHud("detach the rope first (X on the zipline), then move it."); return; }
+            { NoteHud("Detach the rope before moving the zipline."); return; }
 
             // STATE GATE moved to placement time: since the teleport pivot, a same-variant move keeps
             // the SAME object - all state (scarecrow integrity, beehive combs, charger batteries+fuel,
@@ -468,8 +468,14 @@ namespace RaftMovableStorage
             dtm.ShowText("Move", MoveKey.Value.MainKey, 1, 0, false);
             _hintShown = true;
         }
-        // One legacy-uGUI Text under DisplayTextBottom's row, styled from the vanilla prompt font.
+        // One legacy-uGUI Text ABOVE the vanilla bottom-prompt row, styled from the prompt font.
         // Recreated lazily per world (scene unload destroys it -> Unity fake-null -> rebuilt).
+        // Placement measured live (monolab eval): DisplayTextBottom occupies world-y 154..241 on a
+        // 945px screen and nearly TOUCHES the hotbar (~16px gap) - there is NO clean band BELOW the
+        // prompts, so the note goes ABOVE them. Canvas ref height 1080 -> scale .875; NoteY canvas
+        // units * .875 = world y. 300 -> world ~262, just above the prompt row, far above the hotbar,
+        // clear of the centre text (world ~521). Bottom-centre anchored, independent of the bar.
+        private const float NoteY = 300f; // canvas units above screen bottom; single tuning knob
         private static UnityEngine.UI.Text _hudLabel;
         private static void EnsureHudLabel()
         {
@@ -484,8 +490,8 @@ namespace RaftMovableStorage
             var go = new GameObject("PickUpMove_Note", typeof(RectTransform));
             go.transform.SetParent(bottom.parent, false); // sibling of the bar - no layout group touches us
             var rt = (RectTransform)go.transform;
-            rt.anchorMin = bottom.anchorMin; rt.anchorMax = bottom.anchorMax; rt.pivot = bottom.pivot;
-            rt.anchoredPosition = bottom.anchoredPosition + new Vector2(0f, -150f); // bar's texts sit at y=-100 inside it; -150 = clearly the next row
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0f); // bottom-centre of the screen
+            rt.anchoredPosition = new Vector2(0f, NoteY);
             rt.sizeDelta = new Vector2(1400f, 44f);
             _hudLabel = go.AddComponent<UnityEngine.UI.Text>();
             _hudLabel.font = template.font;
@@ -1194,7 +1200,7 @@ namespace RaftMovableStorage
                 // a stateful type we have no adapter for must not be rebuilt (state would be lost).
                 // Those are teleport-only: same surface type keeps the same prefab -> same object.
                 if (HasUnhandledState(original))
-                { NoteHud("that one keeps its contents only on the same surface type - pick a similar spot."); return; }
+                { NoteHud("It only keeps its contents on the same surface type."); return; }
                 Block nb;
                 try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
                 catch (System.Exception ex)
@@ -1246,10 +1252,10 @@ namespace RaftMovableStorage
                     // same teleport-only gate as the host branch, checked locally to save the round
                     // trip (the host enforces it authoritatively anyway via refusal relay)
                     if (!SameVariant(original, item, dps) && HasUnhandledState(original))
-                    { NoteHud("that one keeps its contents only on the same surface type - pick a similar spot."); return; }
+                    { NoteHud("It only keeps its contents on the same surface type."); return; }
                     if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
-                    { NoteHud("couldn't reach the host to move that; left where it was."); AbortKeepOriginal(); return; }
+                    { NoteHud("Couldn't reach the host. Left where it was."); AbortKeepOriginal(); return; }
                     _cmSentTime = Time.realtimeSinceStartup; _cmOrigGoneLogged = false; _cmSeenLogged = false;
                     _cmAcked = false; _cmProbeSent = false;
                     // remember our captured state + snapshot existing blocks so we can find the new one
@@ -1350,7 +1356,7 @@ namespace RaftMovableStorage
                                 RestoreHidden();
                                 _pendingClientMoveOriginal = null; _awaitingHostMove = false;
                                 _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                                NoteHud("client: host declined - " + reason);
+                                NoteHud(reason);
                             }
                         }
                         else if (kind == 3) // ack: the host has the request; it WILL answer - extend the wait
@@ -1361,7 +1367,7 @@ namespace RaftMovableStorage
                                 _clientMoveDeadlineFrame = Time.frameCount + 1800; // verdict failsafe, not a guess window
                                 float dt = Time.realtimeSinceStartup - _cmSentTime;
                                 Log?.LogInfo($"[t] host acked after {dt:F2}s");
-                                if (dt > 3f) NoteHud("host got the request - finishing the move...");
+                                if (dt > 3f) NoteHud("Still working on it...");
                             }
                         }
                         else if (kind == 7) // teleport notify: the block MOVED (same object, all state intact)
@@ -1595,8 +1601,8 @@ namespace RaftMovableStorage
                 _tpBlock.transform.localPosition = _tpOldPos;
                 _tpBlock.transform.localEulerAngles = _tpOldRot;
                 Physics.SyncTransforms();
-                NoteHud("can't place there - it never became supported. Block left where it was.");
-                if (_tpReqSender.IsValid()) SendMoveRefusal(_tpReqSender, _tpBlock.ObjectIndex, "that spot never became supported; block left where it was.");
+                NoteHud("Can't place there. No support. Left where it was.");
+                if (_tpReqSender.IsValid()) SendMoveRefusal(_tpReqSender, _tpBlock.ObjectIndex, "That spot has no support. Left where it was.");
                 _tpBlock = null; _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
                 _tpVerifying = false; _tpReqSender = default;
             }
@@ -1715,12 +1721,12 @@ namespace RaftMovableStorage
             catch { return; }
 
             var original = BlockCreator.GetBlockByObjectIndex(origIndex);
-            if (original == null) { SendMoveRefusal(req.Sender, origIndex, "the host couldn't find that block."); return; }
+            if (original == null) { SendMoveRefusal(req.Sender, origIndex, "The host couldn't find that block."); return; }
             var item = original.buildableItem;
-            if (item == null) { SendMoveRefusal(req.Sender, origIndex, "that block has no buildable item on the host."); return; }
+            if (item == null) { SendMoveRefusal(req.Sender, origIndex, "That block can't be rebuilt on the host."); return; }
             var player = ComponentManager<Network_Player>.Value;
             var bc = player?.BlockCreator;
-            if (bc == null) { SendMoveRefusal(req.Sender, origIndex, "host is not ready (no BlockCreator)."); return; }
+            if (bc == null) { SendMoveRefusal(req.Sender, origIndex, "The host isn't ready. Try again in a moment."); return; }
 
             // SAME PREFAB VARIANT -> teleport (see ConfirmMove): the type-7 notify doubles as the
             // success signal for the requesting client.
@@ -1732,7 +1738,7 @@ namespace RaftMovableStorage
             }
             // teleport-only types must not be rebuilt (unhandled state would be lost)
             if (HasUnhandledState(original))
-            { SendMoveRefusal(req.Sender, origIndex, "keeps its contents only on the same surface type"); return; }
+            { SendMoveRefusal(req.Sender, origIndex, "It only keeps its contents on the same surface type."); return; }
 
             // authoritative capture from the original block (host owns the real state)
             var slots = (original is Storage_Small st && st.GetInventoryReference() != null)
@@ -1754,13 +1760,13 @@ namespace RaftMovableStorage
             catch (System.Exception ex)
             {
                 Log?.LogWarning("client-move create: " + ex.Message); RestoreHidden();
-                SendMoveRefusal(req.Sender, origIndex, "the host couldn't create the block there.");
+                SendMoveRefusal(req.Sender, origIndex, "The host couldn't place it there.");
                 return;
             }
             if (nb == null)
             {
                 RestoreHidden();
-                SendMoveRefusal(req.Sender, origIndex, "the host couldn't create the block there.");
+                SendMoveRefusal(req.Sender, origIndex, "The host couldn't place it there.");
                 return;
             }
             // [t] localize the first-move-of-type ~5s: how long the request waited in Steam's buffer/our
@@ -1806,7 +1812,7 @@ namespace RaftMovableStorage
                         RestoreHidden();
                         _pendingClientMoveOriginal = null; _awaitingHostMove = false;
                         _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                        NoteHud("client: the host never received the request; left where it was.");
+                        NoteHud("The host didn't get the request. Left where it was.");
                     }
                     else if (!_cmProbeSent)
                     {
@@ -1821,7 +1827,7 @@ namespace RaftMovableStorage
                         RestoreHidden();
                         _pendingClientMoveOriginal = null; _awaitingHostMove = false;
                         _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                        NoteHud("client: no answer from the host; left where it was.");
+                        NoteHud("No answer from the host. Left where it was.");
                     }
                 }
                 return;
@@ -1875,7 +1881,7 @@ namespace RaftMovableStorage
             if (_hostNb == null)
             {
                 RestoreHidden();
-                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "the placed block vanished before settling; original kept.");
+                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "The move failed on the host. Left where it was.");
                 _hostVerifying = false; _hostOriginal = null; _hostSlots = null; _hostReqSender = default;
                 Log?.LogWarning("host verify: placed chest vanished before settling; original restored, nothing lost.");
                 return;
@@ -1948,8 +1954,8 @@ namespace RaftMovableStorage
                 try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
                 RestoreHidden();
                 LogStability(_hostNb); // which gizmo cell(s) never found support
-                NoteHud("can't place there - it never became supported (+" + delta + "f). Block left where it was.");
-                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "that spot never became supported; block left where it was.");
+                Note("host place fail at +" + delta + "f"); NoteHud("Can't place there. No support. Left where it was.");
+                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "That spot has no support. Left where it was.");
                 _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
             }
         }
@@ -1987,7 +1993,7 @@ namespace RaftMovableStorage
                 try { BlockCreator.RemoveBlockNetwork(best, null, true); } catch { }
                 RestoreHidden();
                 _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null;
-                NoteHud("client: that spot wouldn't be supported; chest left where it was.");
+                NoteHud("That spot wouldn't hold it. Left where it was.");
                 return;
             }
 

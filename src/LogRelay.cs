@@ -5,7 +5,7 @@ using BepInEx;
 using BepInEx.Logging;
 using UnityEngine;
 
-namespace RaftMovableStorage
+namespace PickUpMove
 {
     // Dev-loop instrumentation. Every line THIS MOD logs is:
     //   (a) mirrored to a PER-SESSION file on the local disk (BepInEx/PickUpMoveLogs/self-<stamp>.log),

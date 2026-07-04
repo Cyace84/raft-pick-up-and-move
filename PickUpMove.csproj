@@ -2,7 +2,8 @@
 
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
-    <AssemblyName>RaftMovableStorage</AssemblyName>
+    <AssemblyName>PickUpMove</AssemblyName>
+    <RootNamespace>PickUpMove</RootNamespace>
     <Version>1.0.0</Version>
     <Authors>Cyace84</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
