@@ -166,7 +166,7 @@ namespace RaftMovableStorage
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build tp5-catalog) loaded. Move key = {MoveKey.Value}.");
+            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build tp6-notes) loaded. Move key = {MoveKey.Value}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
@@ -191,7 +191,16 @@ namespace RaftMovableStorage
         }
 
         // Info = user-facing milestones; Trace = diagnostic non-events (missed raycast, bad spot).
-        internal static void Note(string msg) => Log?.LogInfo(msg);
+        // Note() was LOG-ONLY until tp6 - every refusal reason ('host declined - ...', 'detach the
+        // rope first') was invisible in-game; players saw silent no-ops and read nothing. Now each
+        // note also prints a LOCAL chat line (ChatManager.LocalDebugChatMessage - no network, no
+        // debug gate). Hover prompts stay untouched: absence of 'M Move' is the signal, vanilla
+        // already owns the hover space ('Требуется...' lines) - we answer only when M is PRESSED.
+        internal static void Note(string msg)
+        {
+            Log?.LogInfo(msg);
+            try { ChatManager.LocalDebugChatMessage("[Move] " + msg); } catch { }
+        }
         internal static void Trace(string msg) => Log?.LogDebug(msg);
 
         // Per-frame logic, driven by Ticker.
