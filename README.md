@@ -35,7 +35,10 @@ Change the key in `BepInEx/config/com.cyace84.pickupmove.cfg`.
 
 ## Multiplayer
 
-Works in co-op, as host or as a client. Only the player moving an object needs the mod.
+Works in co-op, as host or as a client — anyone with the mod can move things. To *see* a move
+happen live, a player needs the mod too: moves travel over the mod's own channel, so a modless
+peer won't see the object shift until they rejoin (the new position is saved, so it's correct
+after a reload). For a clean co-op experience, everyone should run the mod.
 
 ## Build from source
 
