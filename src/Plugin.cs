@@ -166,7 +166,7 @@ namespace RaftMovableStorage
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build tp4-peers) loaded. Move key = {MoveKey.Value}.");
+            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build tp5-catalog) loaded. Move key = {MoveKey.Value}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
@@ -263,13 +263,21 @@ namespace RaftMovableStorage
             if (sb == null || !sb.Placeable)
             { Trace($"begin: '{block.buildableItem.UniqueName}' is structure (not Placeable) - not movable."); return; }
 
-            // SAFE GATE (never lose state): we recreate the block fresh, so any deep device state we
-            // don't explicitly carry (desalinator water, blender contents, battery charge, planter
-            // crop, cooking progress) would be lost. Only carry blocks we FULLY preserve - storages
-            // (slots) and signs (text) - or provably stateless decor. Everything else is refused, not
-            // eaten. Verified: each stateful device has its own RGD subtype / networked behaviour.
-            if (HasUnhandledState(block))
-            { Note($"Can't move '{block.buildableItem.UniqueName}' yet - it has contents/state this version would lose. Not moved."); return; }
+            // HARD EXCLUSIONS (mechanics incompatible with carry, not a state problem):
+            // - Block_DetailPlank places by STRETCHING from point A to point B; a single-point carry
+            //   ghost breaks it (observed: sinks under the floor, looks like it vanished). Excluded.
+            // - A zipline with a rope strung: teleporting one end leaves the rope hanging mid-air
+            //   (MeshPath connections don't follow). Detach first, then move. (v2 idea: drag the rope.)
+            if (block is Block_DetailPlank)
+            { Note("the detail plank can't be carried (it's stretched between two points) - remove and rebuild it."); return; }
+            if (HasAttachedRope(block))
+            { Note("detach the rope first (X on the zipline), then move it."); return; }
+
+            // STATE GATE moved to placement time: since the teleport pivot, a same-variant move keeps
+            // the SAME object - all state (scarecrow integrity, beehive combs, charger batteries+fuel,
+            // refiner contents...) survives by construction, so stateful blocks are carryable now.
+            // Only the RECREATE path (surface-type change) can lose unhandled state; ConfirmMove /
+            // HandleMoveRequest refuse THAT with 'same surface type' instead of refusing M here.
 
             // NOTE: no "dependents on top" gate. An OverlapBox-above heuristic wrongly refused normal
             // blocks (stacked chests, a chest under a shelf or the next floor) because a block ABOVE
@@ -356,7 +364,28 @@ namespace RaftMovableStorage
             if (b == null || b.buildableItem == null) return false;
             var sb = b.buildableItem.settings_buildable;
             if (sb == null || !sb.Placeable) return false;
-            return !HasUnhandledState(b);
+            if (b is Block_DetailPlank) return false; // A->B stretch mechanic, incompatible with carry
+            if (HasAttachedRope(b)) return false;     // zipline with a rope strung - detach first
+            return true; // stateful blocks teleport with their state; recreate path gates itself
+        }
+
+        // Zipline endpoints register a MeshPathBase; a strung rope is a MeshPath.PathConnections
+        // entry referencing it. (ZiplineBase.meshPath is private but a child component - decomp
+        // ZiplineBase.cs / MeshPathConnection.cs.)
+        private static bool HasAttachedRope(Block b)
+        {
+            if (!(b is ZiplineBase)) return false;
+            try
+            {
+                var mp = b.GetComponentInChildren<MeshPathBase>(true);
+                if (mp == null) return false;
+                var conns = MeshPath.PathConnections;
+                if (conns != null)
+                    foreach (var c in conns)
+                        if (c != null && (c.baseA == mp || c.baseB == mp)) return true;
+            }
+            catch { return true; } // can't tell -> safer to refuse than strand a rope
+            return false;
         }
 
         // In-world 'M Move' hint, driven every idle frame from the Ticker so it shows on ANY movable
@@ -1093,6 +1122,11 @@ namespace RaftMovableStorage
                     ExitBuildMode();
                     return;
                 }
+                // Variant differs -> RECREATE. Recreation replays state through our RGD adapters;
+                // a stateful type we have no adapter for must not be rebuilt (state would be lost).
+                // Those are teleport-only: same surface type keeps the same prefab -> same object.
+                if (HasUnhandledState(original))
+                { Note("that one keeps its contents only on the same surface type - pick a similar spot."); return; }
                 Block nb;
                 try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
                 catch (System.Exception ex)
@@ -1141,6 +1175,10 @@ namespace RaftMovableStorage
                 // The move-request path hides the original's colliders on the host and places via
                 // CreateBlockCheat, so short-distance moves work like they do for devices.
                 {
+                    // same teleport-only gate as the host branch, checked locally to save the round
+                    // trip (the host enforces it authoritatively anyway via refusal relay)
+                    if (!SameVariant(original, item, dps) && HasUnhandledState(original))
+                    { Note("that one keeps its contents only on the same surface type - pick a similar spot."); return; }
                     if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
                     { Note("couldn't reach the host to move that; left where it was."); AbortKeepOriginal(); return; }
@@ -1624,6 +1662,9 @@ namespace RaftMovableStorage
                 BeginTeleport(original, pos, rot, req.Sender);
                 return;
             }
+            // teleport-only types must not be rebuilt (unhandled state would be lost)
+            if (HasUnhandledState(original))
+            { SendMoveRefusal(req.Sender, origIndex, "keeps its contents only on the same surface type"); return; }
 
             // authoritative capture from the original block (host owns the real state)
             var slots = (original is Storage_Small st && st.GetInventoryReference() != null)
