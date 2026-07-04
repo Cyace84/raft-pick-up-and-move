@@ -45,6 +45,7 @@ namespace RaftMovableStorage
         public const string Guid = "com.cyace84.raftmovablestorage";
 
         public static ConfigEntry<KeyboardShortcut> MoveKey;
+        public static ConfigEntry<bool> RelayLogs;
         public static ManualLogSource Log;
 
         // carry-mode state. `moving` is the block being carried (any Placeable block, not just storage).
@@ -143,6 +144,15 @@ namespace RaftMovableStorage
                 "Aim at a storage and press this to pick it up (with its contents) into placement mode. " +
                 "Left-click to drop it at the new spot. Press the key again or right-click to cancel.");
 
+            RelayLogs = Config.Bind(
+                "General",
+                "RelayLogs",
+                true,
+                "Write this mod's log lines to per-session files (BepInEx/PickUpMoveLogs/) and, when " +
+                "playing as a client, relay them to the host so multiplayer issues can be diagnosed " +
+                "from one machine. Only this mod's own lines are sent.");
+            LogRelay.Init(RelayLogs.Value);
+
             // Own DontDestroyOnLoad ticker: BaseUnityPlugin.Update is not pumped in this env and the
             // plugin component gets destroyed shortly after Awake.
             var go = new GameObject("RMS_Ticker");
@@ -156,7 +166,7 @@ namespace RaftMovableStorage
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build cropfix7) loaded. Move key = {MoveKey.Value}.");
+            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build tp4-peers) loaded. Move key = {MoveKey.Value}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
@@ -187,9 +197,11 @@ namespace RaftMovableStorage
         // Per-frame logic, driven by Ticker.
         internal static void Tick()
         {
-            if (Raft_Network.IsHost) PollMoveRequests(); else PollMoveRefusals();
+            LogRelay.Tick();
+            if (Raft_Network.IsHost) { PollMoveRequests(); ProcessTeleportResends(); } else PollMoveRefusals();
             if (_awaitingClientChest) PollClientChest();
             if (_awaitingHostMove) PollClientMove();
+            if (_tpVerifying) { PollTeleportVerify(); return; }
             if (_hostVerifying) { PollHostVerify(); return; }
 
             if (MoveKey.Value.IsDown())
@@ -200,7 +212,7 @@ namespace RaftMovableStorage
                 // corrupt them - the prior original loses its restore info (stays invisible on the client)
                 // or its removal reference (never removed => duplicate). Moves are near-instant when they
                 // work, and every pending state self-resolves on a <=10s timeout, so this never locks up.
-                else if (_awaitingClientChest || _awaitingHostMove || _hostVerifying)
+                else if (_awaitingClientChest || _awaitingHostMove || _hostVerifying || _tpVerifying)
                     Note("finishing the previous move - try again in a moment.");
                 else TryBeginMove();
                 return;
@@ -292,9 +304,13 @@ namespace RaftMovableStorage
             // them - by the next Tick it's settled, same as at placement time. Cosmetic only.
             _hideDepsPending = true;
 
-            // make sure the build creator is active so the ghost shows, then engage it
+            // make sure the build creator is active so the ghost shows, then engage it. Remember
+            // whether WE enabled it: without the hammer equipped it's inactive, and its Update drives
+            // the whole build UI (BuildMenu prompt + RMB opens the menu), so ExitBuildMode must put it
+            // back or the build-materials button haunts every held item.
             var bc = player.BlockCreator;
-            if (bc != null && !bc.gameObject.activeSelf) bc.gameObject.SetActive(true);
+            _bcWasInactive = bc != null && !bc.gameObject.activeSelf;
+            if (_bcWasInactive) bc.gameObject.SetActive(true);
             bc?.SetBlockTypeToBuild(movingItem);
 
             Note($"Carrying '{movingItem.UniqueName}'" + ((movingSlots?.Length ?? 0) > 0 ? $" ({movingSlots.Length} slots)" : "") + ". LMB to place.");
@@ -465,6 +481,61 @@ namespace RaftMovableStorage
             catch (System.Exception ex) { Log?.LogWarning("[cropdiag] dereg " + ex.Message); }
         }
 
+        // HOST -> clients: re-announce every plant on the moved cropplot(s) through the game's own
+        // planting pipeline, AFTER the original block was removed (reliable Channel_Game keeps the
+        // order: remove-original arrives first, so the re-used plantObjectIndex has a single holder on
+        // the client). Message_PlantSeed makes the client create+REGISTER the plant (the same path
+        // vanilla uses when the host plants/refills - client harvest provably works there), and
+        // Message_Plant_Complete matures the fully-grown ones. Partially-grown plants re-grow client-
+        // side and sync at maturity via the host's own Plant.Grow broadcast.
+        private static void FlushPlantBroadcasts(Network_Player player)
+        {
+            if (_plantBroadcastPlots.Count == 0) return;
+            try
+            {
+                var net = player?.Network;
+                var pm = player?.PlantManager;
+                if (net == null || pm == null) { _plantBroadcastPlots.Clear(); return; }
+                foreach (var plot in _plantBroadcastPlots)
+                {
+                    if (plot == null || plot.plantationSlots == null) continue;
+                    // Message_PlantSeed carries NO slot index: the client's handler plants into the
+                    // FIRST FREE slot of the (fresh, empty) replica, so the k-th seed we send lands in
+                    // slot k-1 - regardless of which slots the plants occupy on the host (harvested
+                    // gaps survive the restore there). Address Message_Plant_Complete at the CLIENT's
+                    // slot, not the host's, or a completion aimed at a gap silently no-ops and the
+                    // plant stays a seedling on the client (observed: 1 of 3 flowers reset).
+                    int clientSlot = 0;
+                    foreach (var slot in plot.plantationSlots)
+                    {
+                        var plant = slot?.plant;
+                        var nid = plant?.pickupComponent?.networkID;
+                        if (plant == null || nid == null) continue;
+                        // FRESH index - the invariant vanilla maintains (Deserialize(PlantSeed) always
+                        // assigns a new unique index per planting). Re-using the original's index left
+                        // DEAD registry entries on the CLIENT (its original plants die with the removed
+                        // block and nothing deregisters them), and GetNetworkIDFromObjectIndex hits the
+                        // dead entry first -> Unity-fake-null -> the moved plant can't be interacted with.
+                        // The registry stores the object; its index is a field, so reassigning is enough
+                        // host-side too.
+                        nid.ObjectIndex = SaveAndLoad.GetUniqueObjectIndex();
+                        var seed = new Message_PlantSeed(Messages.PlantManager_PlantSeed, pm, plot, plant, slot.hasWater);
+                        seed.plantObjectIndex = nid.ObjectIndex; // client registers under the host's fresh index -> harvest resolves
+                        net.RPC(seed, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                        if (plant.FullyGrown())
+                        {
+                            var done = new Message_Plant_Complete(Messages.PlantManager_PlantComplete, pm, plot, plant);
+                            done.plantationSlotIndex = clientSlot; // the slot the client's first-free fill just used
+                            net.RPC(done, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                        }
+                        clientSlot++;
+                    }
+                }
+            }
+            catch (System.Exception ex) { Log?.LogWarning("plant broadcast: " + ex.Message); }
+            _plantBroadcastPlots.Clear();
+        }
+
         // [stab] dump per-gizmo support for a block that reads !IsStable (multi-cell devices like the
         // recycler have several gizmo boxes; requireAll means ONE unsupported cell fails the whole block).
         private static void LogStability(Block b)
@@ -503,38 +574,26 @@ namespace RaftMovableStorage
                 switch (rgd)
                 {
                     case RGD_Cropplot rc:
+                        // CLIENT: do NOT re-plant locally. A client-side PlantSeed never lands in the
+                        // registry the harvest lookup reads (observed: plantPlaced=True, correct index,
+                        // registered=False even after an explicit AddNetworkID) - the un-harvestable-plant
+                        // bug. Instead the HOST re-broadcasts every restored plant through the game's own
+                        // Message_PlantSeed/_Plant_Complete after the original is removed (FlushPlantBroadcasts),
+                        // the exact path vanilla uses to show host plantings to clients.
+                        if (!Raft_Network.IsHost) break;
                         var plot = nb.GetComponent<Cropplot>();
                         var pm = ComponentManager<Network_Player>.Value?.PlantManager;
                         if (plot != null && pm != null)
                         {
-                            // [cropdiag] preconditions PlantSeed checks (IsFull / prefab lookup / slot list)
-                            try
-                            {
-                                int slotCount = plot.plantationSlots?.Count ?? -1;
-                                Log?.LogInfo($"[cropdiag] pre host={Raft_Network.IsHost} isFull={plot.IsFull} slots={slotCount}");
-                                if (rc.plantationSlots != null)
-                                    foreach (var ps in rc.plantationSlots)
-                                    {
-                                        if (ps == null || ps.uniquePlantIndex == -1) continue;
-                                        bool prefabOk = pm.GetPlantByIndex(ps.uniquePlantIndex) != null;
-                                        bool slotOk = ps.plantationSlotIndex >= 0 && ps.plantationSlotIndex < slotCount;
-                                        Log?.LogInfo($"[cropdiag] pre slot={ps.plantationSlotIndex} plantIdx={ps.uniquePlantIndex} prefabOk={prefabOk} slotOk={slotOk} grow={ps.growTimer}");
-                                    }
-                            }
-                            catch (System.Exception ex) { Log?.LogWarning("[cropdiag] pre " + ex.Message); }
-
                             rc.RestoreCropplot(plot, pm);
 
                             // Harvest resolves plants by index: PlantManager.Deserialize(HarvestPlant) ->
                             // NetworkIDManager.GetNetworkIDFromObjectIndex<PickupItem_Networked>(idx), and the
                             // '!= null' gate there is Unity's overloaded operator. Nothing deregisters a plant
-                            // when its block is destroyed (MonoBehaviour_ID.OnDestroy is empty; RemovePickupItem
-                            // runs only on the pickup path), so the DESTROYED original plant keeps a stale entry
-                            // under the SAME ObjectIndex. GetNetworkIDFromObjectIndex returns the FIRST index
-                            // match - if that's the destroyed one, it's Unity-fake-null and harvest silently
-                            // breaks. Fix: purge DEAD entries with our index from the PickupItem_Networked
-                            // bucket (live ones - e.g. the hidden original pre-removal on the host - are kept:
-                            // an undone move must not deregister a surviving original), then register ours.
+                            // when its block is destroyed, so a DESTROYED original plant keeps a stale entry
+                            // under the SAME ObjectIndex and shadows the restored one (harvest silently breaks).
+                            // Purge DEAD same-index entries (live ones - the hidden original pre-removal - are
+                            // kept: an undone move must not lose the surviving original), then register ours.
                             try
                             {
                                 var dictField = typeof(NetworkIDManager).GetField("networkIDs",
@@ -548,9 +607,8 @@ namespace RaftMovableStorage
                                         Plant placed = (ps.plantationSlotIndex >= 0 && ps.plantationSlotIndex < (plot.plantationSlots?.Count ?? 0))
                                             ? plot.plantationSlots[ps.plantationSlotIndex].plant : null;
                                         var nid = placed?.pickupComponent?.networkID;
-                                        if (nid == null) { Log?.LogWarning($"[cropdiag] fix slot={ps.plantationSlotIndex} no plant/networkID"); continue; }
+                                        if (nid == null) continue;
                                         uint want = ps.plantObjectIndex;
-                                        int dupAlive = 0, dupDead = 0, purged = 0;
                                         if (byTag != null)
                                         {
                                             var stale = new List<MonoBehaviour_ID_Network>();
@@ -558,20 +616,17 @@ namespace RaftMovableStorage
                                                 foreach (MonoBehaviour_ID_Network item in (System.Collections.IEnumerable)de.Value)
                                                 {
                                                     if (object.ReferenceEquals(item, nid) || item.ObjectIndex != want) continue;
-                                                    if (item == null) { dupDead++; stale.Add(item); } // Unity-fake-null: destroyed shadow
-                                                    else dupAlive++;                                  // live duplicate: keep (hidden original)
+                                                    if (item == null) stale.Add(item); // Unity-fake-null: destroyed shadow
                                                 }
-                                            foreach (var s in stale) { NetworkIDManager.RemoveNetworkID(s, typeof(PickupItem_Networked)); purged++; }
+                                            foreach (var s in stale) NetworkIDManager.RemoveNetworkID(s, typeof(PickupItem_Networked));
                                         }
                                         NetworkIDManager.AddNetworkID(nid); // idempotent - HashSet add
-                                        var gen = NetworkIDManager.GetNetworkIDFromObjectIndex<PickupItem_Networked>(want);
-                                        bool genFound = (object)gen != null;   // present in bucket (even if destroyed)
-                                        bool genAlive = gen != null;           // Unity-alive
-                                        bool genOurs = object.ReferenceEquals(gen, nid);
-                                        Log?.LogInfo($"[cropdiag] fix3 slot={ps.plantationSlotIndex} want={want} nidIdx={nid.ObjectIndex} nidType={nid.GetType().Name} dupAlive={dupAlive} dupDead={dupDead} purged={purged} genFound={genFound} genAlive={genAlive} genOurs={genOurs}");
                                     }
                             }
-                            catch (System.Exception ex) { Log?.LogWarning("[cropdiag] fix " + ex.Message); }
+                            catch (System.Exception ex) { Log?.LogWarning("plant re-register: " + ex.Message); }
+
+                            // queue for the post-removal broadcast to clients (see FlushPlantBroadcasts)
+                            _plantBroadcastPlots.Add(plot);
                         }
                         break;
                     case RGD_Block_Sprinkler rs:
@@ -684,6 +739,16 @@ namespace RaftMovableStorage
         private static readonly System.Collections.Generic.List<Collider> _depColliderDisabled = new System.Collections.Generic.List<Collider>();
         private static int _depMovedCount;
         private static bool _hideDepsPending;
+        // BlockCreator was INACTIVE when the move started (no hammer in hands): we enabled it for the
+        // ghost, so we must disable it again on exit. Vanilla gates the whole build UI (the 'BuildMenu'
+        // prompt + RMB opening the menu, BlockCreator.Update:268-283) purely on this component being
+        // enabled while the hammer is equipped - leaving it on gave a build-materials button while
+        // holding a water cup. isRotating is reset BEFORE deactivation, so the frozen-Update hotbar
+        // lock can't recur (it freezes at false).
+        private static bool _bcWasInactive;
+        // Cropplots restored on the HOST whose plants must be re-broadcast to clients AFTER the
+        // original block is removed (game-native Message_PlantSeed/_Plant_Complete; see FlushPlantBroadcasts).
+        private static readonly System.Collections.Generic.List<Cropplot> _plantBroadcastPlots = new System.Collections.Generic.List<Cropplot>();
 
         private static Carried Capture(Block b, Block relativeTo)
         {
@@ -781,9 +846,17 @@ namespace RaftMovableStorage
                         catch { }
                         Log?.LogInfo($"[dep] '{(pbi != null ? pbi.UniqueName : pb.name)}' reads unstable near '{(hb.buildableItem != null ? hb.buildableItem.UniqueName : hb.name)}'"
                             + $" dist={Vector3.Distance(pb.transform.position, hb.transform.position):F2} preUnstable={preUnstable} pos={pb.transform.localPosition.ToString("F2")}");
-                        LogStability(pb);
-                        if (pbi?.settings_buildable == null || !pbi.settings_buildable.Placeable || HasUnhandledState(pb))
-                        { failMsg = $"Didn't move - '{(pbi != null ? pbi.UniqueName : "something")}' resting on it has state I can't carry yet" + (preUnstable ? " (it was already unsupported before this move)" : "") + "."; return false; }
+                        // ALREADY unstable before this move (chronic neighbour - e.g. a fence on a window
+                        // whose gizmo never finds support): not resting on us, not our business. Refusing
+                        // for these locked whole areas of the raft out of moving (observed:
+                        // Block_Wall_Fence_Tier3 vetoing every chest move near it).
+                        if (preUnstable) continue;
+                        // STRUCTURE can never rest on a placeable (the game won't let you build a wall or
+                        // fence ON a chest), so a non-Placeable block here is a false positive of the
+                        // overlap heuristic - skip it instead of vetoing the move.
+                        if (pbi?.settings_buildable == null || !pbi.settings_buildable.Placeable) continue;
+                        if (HasUnhandledState(pb))
+                        { failMsg = $"Didn't move - '{pbi.UniqueName}' resting on it has state I can't carry yet."; return false; }
                         captured.Add(Capture(pb, original));
                         frontier.Add(pb);
                         foreach (var c in pb.GetComponentsInChildren<Collider>())
@@ -901,10 +974,15 @@ namespace RaftMovableStorage
 
             if (player?.Network == null) return;
             var pos = nb.transform.localPosition;
+            // Message_PaintBlock's ctor reads BOTH color.uniqueColorIndex and patternColor.uniqueColorIndex,
+            // so a null patternColor (solid paint, no pattern) can't be sent as-is - but silently skipping
+            // the side meant a solid-painted block lost its colour on every other peer (the client-move
+            // chest regression). Substitute the main colour: with the block's own patternIndex the
+            // pattern colour is inert when no pattern is set.
             try
             {
-                if (p.cA != null && p.pcA != null) SendPaint(player, nb.ObjectIndex, pos, p.cA, p.pcA, 1, p.pi1);
-                if (p.cB != null && p.pcB != null) SendPaint(player, nb.ObjectIndex, pos, p.cB, p.pcB, 2, p.pi2);
+                if (p.cA != null) SendPaint(player, nb.ObjectIndex, pos, p.cA, p.pcA != null ? p.pcA : p.cA, 1, p.pi1);
+                if (p.cB != null) SendPaint(player, nb.ObjectIndex, pos, p.cB, p.pcB != null ? p.pcB : p.cB, 2, p.pi2);
             }
             catch (System.Exception ex) { Log?.LogWarning("paint network failed: " + ex.Message); }
         }
@@ -960,6 +1038,10 @@ namespace RaftMovableStorage
             }
             catch (System.Exception ex) { Log?.LogWarning("exit build: " + ex.Message); }
             bc.SetGhostBlockVisibility(false);
+            // If the move ENABLED the BlockCreator (no hammer equipped), disable it again: enabled, its
+            // Update draws the 'BuildMenu' prompt and RMB opens the build menu with ANY item in hands.
+            // Safe against the old hotbar lock - isRotating was just reset, so it freezes at false.
+            if (_bcWasInactive) { _bcWasInactive = false; try { bc.gameObject.SetActive(false); } catch { } }
         }
 
         // Read the vanilla ghost, remove the original, recreate at the new spot, restore inventory.
@@ -996,6 +1078,21 @@ namespace RaftMovableStorage
             // the original, so nothing is ever lost. (This was the user's big-chest-on-a-wall loss.)
             if (Raft_Network.IsHost)
             {
+                // SAME PREFAB VARIANT -> teleport the existing block: nothing recreated, nothing
+                // removed, no state to carry, no replication lifecycle to lose. Variant identity is
+                // compared by prefab NAME (instances are 'PrefabName(Clone)') - the dpsType enum on a
+                // variant prefab does NOT reliably equal the surface we send (observed: wall chest,
+                // req dps=Wall, went recreate), names are truth by construction. The carry already has
+                // the original's colliders off, so the stack detection inside BeginTeleport sees the
+                // dependents; RestoreHidden un-hides the SAME object at its new spot.
+                if (SameVariant(original, item, dps))
+                {
+                    BeginTeleport(original, pos, rot, default);
+                    moving = null; movingItem = null; movingSlots = null;
+                    RestoreHidden();
+                    ExitBuildMode();
+                    return;
+                }
                 Block nb;
                 try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
                 catch (System.Exception ex)
@@ -1048,6 +1145,7 @@ namespace RaftMovableStorage
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
                     { Note("couldn't reach the host to move that; left where it was."); AbortKeepOriginal(); return; }
                     _cmSentTime = Time.realtimeSinceStartup; _cmOrigGoneLogged = false; _cmSeenLogged = false;
+                    _cmAcked = false; _cmProbeSent = false;
                     // remember our captured state + snapshot existing blocks so we can find the new one
                     // and restore it on our own view (host's restore doesn't replicate device state back).
                     _clientMoveRgd = movingRgd; _clientMoveSlots = movingSlots;
@@ -1133,16 +1231,91 @@ namespace RaftMovableStorage
                     try
                     {
                         using var r = new BinaryReader(new MemoryStream(buf));
-                        if (r.ReadUInt32() != MoveMagic || r.ReadByte() != 2) continue;
+                        if (r.ReadUInt32() != MoveMagic) continue;
+                        byte kind = r.ReadByte();
                         uint origIndex = r.ReadUInt32();
-                        string reason = r.ReadString();
-                        if (_awaitingHostMove && _pendingClientMoveOriginal != null
-                            && _pendingClientMoveOriginal.ObjectIndex == origIndex)
+                        bool mine = _awaitingHostMove && _pendingClientMoveOriginal != null
+                            && _pendingClientMoveOriginal.ObjectIndex == origIndex;
+                        if (kind == 2) // refusal
                         {
-                            RestoreHidden();
-                            _pendingClientMoveOriginal = null; _awaitingHostMove = false;
-                            _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                            Note("client: host declined - " + reason);
+                            string reason = r.ReadString();
+                            if (mine)
+                            {
+                                RestoreHidden();
+                                _pendingClientMoveOriginal = null; _awaitingHostMove = false;
+                                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                                Note("client: host declined - " + reason);
+                            }
+                        }
+                        else if (kind == 3) // ack: the host has the request; it WILL answer - extend the wait
+                        {
+                            if (mine && !_cmAcked)
+                            {
+                                _cmAcked = true;
+                                _clientMoveDeadlineFrame = Time.frameCount + 1800; // verdict failsafe, not a guess window
+                                float dt = Time.realtimeSinceStartup - _cmSentTime;
+                                Log?.LogInfo($"[t] host acked after {dt:F2}s");
+                                if (dt > 3f) Note("host got the request - finishing the move...");
+                            }
+                        }
+                        else if (kind == 7) // teleport notify: the block MOVED (same object, all state intact)
+                        {
+                            var tpPos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                            var tpRot = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                            var tb = BlockCreator.GetBlockByObjectIndex(origIndex);
+                            if (tb != null)
+                            {
+                                tb.transform.localPosition = tpPos;
+                                tb.transform.localEulerAngles = tpRot;
+                            }
+                            if (mine) // our pending move completed as a teleport - un-hide the SAME object at its new spot
+                            {
+                                RestoreHidden();
+                                _pendingClientMoveOriginal = null; _awaitingHostMove = false;
+                                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                                Log?.LogInfo($"[t] teleported {Time.realtimeSinceStartup - _cmSentTime:F2}s after request");
+                                Note("client: host moved it.");
+                            }
+                        }
+                        else if (kind == 6) // probe reply: does the original still exist on the host?
+                        {
+                            bool exists = r.ReadByte() != 0;
+                            if (mine && _cmProbeSent)
+                            {
+                                if (exists)
+                                {
+                                    // it exists - sync our replica to the host's CURRENT transform (if
+                                    // the move was a teleport whose notifies were all lost, this is
+                                    // where we converge instead of resurrecting it at the old spot)
+                                    try
+                                    {
+                                        var hp = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                                        var hr = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                                        _pendingClientMoveOriginal.transform.localPosition = hp;
+                                        _pendingClientMoveOriginal.transform.localEulerAngles = hr;
+                                    }
+                                    catch { }
+                                    RestoreHidden();
+                                    _pendingClientMoveOriginal = null; _awaitingHostMove = false;
+                                    _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                                    Note("client: synced with the host.");
+                                }
+                                else
+                                {
+                                    // The move DID happen but its replication was lost mid-outage: our
+                                    // original is a zombie (the host doesn't know it - dead E prompt,
+                                    // unmovable, Z-fighting dupe). Remove it locally exactly like the
+                                    // lost vanilla message would have, then let PHASE 2 pick up the new
+                                    // block if its creation replicated.
+                                    var z = _pendingClientMoveOriginal;
+                                    _pendingClientMoveOriginal = null;
+                                    _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
+                                    try { BlockCreator.RemoveBlock(z, null, true); }
+                                    catch (System.Exception ex) { Log?.LogWarning("zombie cleanup: " + ex.Message); }
+                                    _clientMoveDeadlineFrame = Time.frameCount; // phase 2 grace runs from now
+                                    Note("client: the host moved it but the confirmation was lost - cleaned up the stale copy.");
+                                }
+                            }
                         }
                     }
                     catch { }
@@ -1153,6 +1326,195 @@ namespace RaftMovableStorage
 
         private sealed class MoveReq { public byte[] Buf; public Steamworks.CSteamID Sender; public float RecvTime; }
         private static readonly Queue<MoveReq> _moveReqQueue = new Queue<MoveReq>();
+        // origIndexes whose client canceled the request before we started it (packet types: 1=request,
+        // 2=refusal, 3=ack, 4=cancel, 5=probe, 6=probe-reply). A newer request for the same index
+        // supersedes an older cancel (per-peer FIFO ordering on the reliable channel guarantees the
+        // cancel always drains before the retry).
+        private static readonly HashSet<uint> _canceledReqs = new HashSet<uint>();
+        // CLIENT: host acknowledged our pending move request (it WILL answer with success or refusal,
+        // so the blind timeout no longer applies); probe = zombie check after a lost verdict.
+        private static bool _cmAcked, _cmProbeSent;
+        private static int _cmProbeDeadline;
+
+        // ---- TELEPORT MOVE (same-surface) ----------------------------------------------------
+        // Move the EXISTING block by setting its transform - nothing is removed or recreated, so no
+        // state can possibly be lost (same ObjectIndex, same inventory, same paint, same plants) and
+        // there is no create/remove replication to lose on a flaky link (the zombie/dupe class dies).
+        // Position is STATE, not an event: the notify packet (type 7) is idempotent and is re-sent a
+        // couple of times; even a total loss self-heals via the probe (which now carries the current
+        // transform). Only a surface change (Floor->Wall = different prefab variant) still uses the
+        // old recreate pipeline. RGD_Block reads block.transform at save time (RGD_Block ctor:300),
+        // so saves are correct; placeables sit in no position-keyed cache (walkable-grid is structure).
+        private static Block _tpBlock;
+        private static Vector3 _tpOldPos, _tpOldRot;
+        private static readonly List<Block> _tpDeps = new List<Block>();
+        private static readonly List<Vector3> _tpDepsOldPos = new List<Vector3>();
+        private static readonly List<Quaternion> _tpDepsOldRot = new List<Quaternion>();
+        private static bool _tpVerifying;
+        private static int _tpVerifyStart;
+        private static float _tpVerifyDeadlineTime;
+        private static Steamworks.CSteamID _tpReqSender;
+        private sealed class TpSend { public Steamworks.CSteamID To; public byte[] Payload; public float Next; public int Left; }
+        private static readonly List<TpSend> _tpSends = new List<TpSend>();
+
+        // Teleport is only legal when the target placement uses the SAME prefab variant as the
+        // existing block (a Floor->Wall move instantiates a different prefab - holder, gizmos - and
+        // must go through the recreate pipeline). Compare by prefab name: the live block is
+        // 'PrefabName(Clone)'; enum dpsType on the variant prefab is NOT a reliable discriminator
+        // (observed mismatch on a wall chest re-placed on the same wall).
+        private static bool SameVariant(Block original, Item_Base item, DPS dps)
+        {
+            try
+            {
+                var reqPrefab = item?.settings_buildable?.GetBlockPrefab(dps);
+                if (reqPrefab == null || original == null) return false;
+                string origBase = original.name.Replace("(Clone)", "").Trim();
+                bool same = origBase == reqPrefab.name;
+                if (!same) Log?.LogInfo($"[t] variant differs: orig='{origBase}' req='{reqPrefab.name}' (dps={dps}, origDps={original.dpsType}) -> recreate path");
+                return same;
+            }
+            catch { return false; }
+        }
+
+        private static byte[] BuildTeleportPayload(uint idx, Vector3 pos, Vector3 rot)
+        {
+            using var ms = new MemoryStream();
+            using var w = new BinaryWriter(ms);
+            w.Write(MoveMagic); w.Write((byte)7); w.Write(idx);
+            w.Write(pos.x); w.Write(pos.y); w.Write(pos.z);
+            w.Write(rot.x); w.Write(rot.y); w.Write(rot.z);
+            return ms.ToArray();
+        }
+
+        private static void SendTeleport(Steamworks.CSteamID to, uint idx, Vector3 pos, Vector3 rot)
+        {
+            if (!to.IsValid()) return;
+            var payload = BuildTeleportPayload(idx, pos, rot);
+            try { Steamworks.SteamNetworking.SendP2PPacket(to, payload, (uint)payload.Length, Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel); }
+            catch (System.Exception ex) { Log?.LogWarning("send teleport: " + ex.Message); }
+            // idempotent - repeat twice against session drops (a lost transform packet otherwise waits
+            // for the probe to converge)
+            _tpSends.Add(new TpSend { To = to, Payload = payload, Next = Time.realtimeSinceStartup + 1f, Left = 2 });
+        }
+
+        private static void ProcessTeleportResends()
+        {
+            for (int i = _tpSends.Count - 1; i >= 0; i--)
+            {
+                var s = _tpSends[i];
+                if (Time.realtimeSinceStartup < s.Next) continue;
+                try { Steamworks.SteamNetworking.SendP2PPacket(s.To, s.Payload, (uint)s.Payload.Length, Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel); } catch { }
+                s.Left--; s.Next = Time.realtimeSinceStartup + 2f;
+                if (s.Left <= 0) _tpSends.RemoveAt(i);
+            }
+        }
+
+        // Real Steam ids of remote peers, learned from ReadP2PPacket senders (move channel + log
+        // relay - the relay batches keep this fresh the whole session). This is the ONLY trustworthy
+        // address source: vanilla 'SendP2P' is PLAYFAB PARTY, not Steam - Network_UserId/remoteUsers
+        // keys are PlayFab EntityKey ids (hex), so CSteamID((ulong)kv.Key) addressed NOBODY. That is
+        // why every type-7 notify was lost (0/3 in session 07-04) while ACK/refusal/probe-reply -
+        // all sent to req.Sender, a real CSteamID - always arrived. (Raft_Network.cs:1858 SendP2P
+        // resolves Network_UserId against PlayFabMultiplayerManager.RemotePlayers.)
+        private static readonly Dictionary<ulong, float> _knownPeers = new Dictionary<ulong, float>();
+        internal static void RegisterPeer(Steamworks.CSteamID id)
+        {
+            if (id.IsValid()) _knownPeers[id.m_SteamID] = Time.realtimeSinceStartup;
+        }
+
+        private static void BroadcastTeleport(Block b)
+        {
+            if (b == null) return;
+            if (_tpReqSender.IsValid()) RegisterPeer(_tpReqSender); // requester always covered
+            foreach (var sid in _knownPeers.Keys)
+                SendTeleport(new Steamworks.CSteamID(sid), b.ObjectIndex, b.transform.localPosition, b.transform.localEulerAngles);
+        }
+
+        // HOST: teleport `b` (and everything resting on it, by the same rigid delta) to pos/rot, then
+        // verify support; a spot that never settles is undone by simply putting the transforms back.
+        private static void BeginTeleport(Block b, Vector3 pos, Vector3 rot, Steamworks.CSteamID reqSender)
+        {
+            _tpBlock = b; _tpOldPos = b.transform.localPosition; _tpOldRot = b.transform.localEulerAngles;
+            _tpReqSender = reqSender;
+            _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
+
+            // detect the stack with b's colliders off (works both mid-carry, where they're already
+            // off, and for a client request, where we toggle them here)
+            var offs = new List<Collider>();
+            foreach (var c in b.GetComponentsInChildren<Collider>())
+                if (c.enabled) { c.enabled = false; offs.Add(c); }
+            List<Block> deps;
+            try { deps = DetectCascadeTreeBlocks(b); }
+            finally { foreach (var c in offs) c.enabled = true; }
+
+            var dR = Quaternion.Euler(rot) * Quaternion.Inverse(Quaternion.Euler(_tpOldRot));
+            foreach (var d in deps)
+            {
+                if (d == null) continue;
+                _tpDeps.Add(d);
+                _tpDepsOldPos.Add(d.transform.localPosition);
+                _tpDepsOldRot.Add(d.transform.localRotation);
+                d.transform.localPosition = pos + dR * (d.transform.localPosition - _tpOldPos);
+                d.transform.localRotation = dR * d.transform.localRotation;
+            }
+            b.transform.localPosition = pos;
+            b.transform.localEulerAngles = rot;
+            Physics.SyncTransforms();
+            _tpVerifyStart = Time.frameCount;
+            _tpVerifyDeadlineTime = Time.realtimeSinceStartup + 6f;
+            _tpVerifying = true;
+        }
+
+        private static void PollTeleportVerify()
+        {
+            if (_tpBlock == null) { _tpVerifying = false; _tpDeps.Clear(); _tpReqSender = default; return; }
+            bool stable = false;
+            try { stable = _tpBlock.IsStable(); } catch { }
+            if (stable)
+            {
+                int delta = Time.frameCount - _tpVerifyStart;
+                BroadcastTeleport(_tpBlock);
+                foreach (var d in _tpDeps) if (d != null) BroadcastTeleport(d);
+                Note($"moved to {_tpBlock.transform.localPosition.ToString("F2")} (+{delta}f, teleport)"
+                    + (_tpDeps.Count > 0 ? $"; carried {_tpDeps.Count} on top" : ""));
+                _tpBlock = null; _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
+                _tpVerifying = false; _tpReqSender = default;
+                return;
+            }
+            if (Time.realtimeSinceStartup > _tpVerifyDeadlineTime)
+            {
+                LogStability(_tpBlock);
+                for (int i = 0; i < _tpDeps.Count; i++)
+                    if (_tpDeps[i] != null) { _tpDeps[i].transform.localPosition = _tpDepsOldPos[i]; _tpDeps[i].transform.localRotation = _tpDepsOldRot[i]; }
+                _tpBlock.transform.localPosition = _tpOldPos;
+                _tpBlock.transform.localEulerAngles = _tpOldRot;
+                Physics.SyncTransforms();
+                Note("can't place there - it never became supported. Block left where it was.");
+                if (_tpReqSender.IsValid()) SendMoveRefusal(_tpReqSender, _tpBlock.ObjectIndex, "that spot never became supported; block left where it was.");
+                _tpBlock = null; _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
+                _tpVerifying = false; _tpReqSender = default;
+            }
+        }
+
+        // tiny control packet on the move channel: ack / cancel / probe / probe-reply.
+        private static void SendMoveCtl(Steamworks.CSteamID to, byte type, uint origIndex, byte extra = 0)
+        {
+            if (!to.IsValid()) return;
+            try
+            {
+                byte[] data;
+                using (var ms = new MemoryStream())
+                using (var w = new BinaryWriter(ms))
+                {
+                    w.Write(MoveMagic); w.Write(type); w.Write(origIndex);
+                    if (type == 6) w.Write(extra);
+                    data = ms.ToArray();
+                }
+                Steamworks.SteamNetworking.SendP2PPacket(to, data, (uint)data.Length,
+                    Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
+            }
+            catch (System.Exception ex) { Log?.LogWarning("send ctl: " + ex.Message); }
+        }
 
         // HOST: always drain the socket (so packets don't pile up in Steam's buffer), but run only ONE
         // move at a time - each kicks off the place-first verify pipeline. A request that arrives while
@@ -1166,14 +1528,65 @@ namespace RaftMovableStorage
                 {
                     var buf = new byte[size];
                     if (!Steamworks.SteamNetworking.ReadP2PPacket(buf, size, out uint _, out Steamworks.CSteamID sender, MoveChannel)) break;
-                    _moveReqQueue.Enqueue(new MoveReq { Buf = buf, Sender = sender, RecvTime = Time.realtimeSinceStartup });
+                    RegisterPeer(sender);
+                    if (buf.Length < 9) continue;
+                    byte kind; uint idx;
+                    try
+                    {
+                        using var r = new BinaryReader(new MemoryStream(buf));
+                        if (r.ReadUInt32() != MoveMagic) continue;
+                        kind = r.ReadByte(); idx = r.ReadUInt32();
+                    }
+                    catch { continue; }
+                    switch (kind)
+                    {
+                        case 1: // move request: ack IMMEDIATELY (even while busy) so the client knows
+                                // it's in flight and doesn't blind-timeout into a split brain (observed:
+                                // >10s Steam transit -> client gave up + retried while we executed the
+                                // stale request anyway -> zombie chest / dupes / 'couldn't find').
+                            _canceledReqs.Remove(idx); // a retry supersedes any older cancel
+                            SendMoveCtl(sender, 3, idx);
+                            _moveReqQueue.Enqueue(new MoveReq { Buf = buf, Sender = sender, RecvTime = Time.realtimeSinceStartup });
+                            break;
+                        case 4: // cancel: drop the request if we haven't started it
+                            _canceledReqs.Add(idx);
+                            Log?.LogInfo($"[t] client canceled move request for block #{idx}");
+                            break;
+                        case 5: // probe: does this block still exist here? reply carries the current
+                                // transform so the client converges even when every notify was lost
+                            var pb = BlockCreator.GetBlockByObjectIndex(idx);
+                            if (pb == null) SendMoveCtl(sender, 6, idx, 0);
+                            else
+                            {
+                                try
+                                {
+                                    using var ms = new MemoryStream();
+                                    using var w = new BinaryWriter(ms);
+                                    w.Write(MoveMagic); w.Write((byte)6); w.Write(idx); w.Write((byte)1);
+                                    var pp = pb.transform.localPosition; var pr = pb.transform.localEulerAngles;
+                                    w.Write(pp.x); w.Write(pp.y); w.Write(pp.z);
+                                    w.Write(pr.x); w.Write(pr.y); w.Write(pr.z);
+                                    var data = ms.ToArray();
+                                    Steamworks.SteamNetworking.SendP2PPacket(sender, data, (uint)data.Length, Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
+                                }
+                                catch (System.Exception ex) { Log?.LogWarning("probe reply: " + ex.Message); }
+                            }
+                            break;
+                    }
                 }
             }
             catch (System.Exception ex) { Log?.LogWarning("move req poll: " + ex.Message); }
 
-            if (!_hostVerifying && moving == null && _moveReqQueue.Count > 0)
-                HandleMoveRequest(_moveReqQueue.Dequeue());
-            else if (_moveReqQueue.Count > 0 && Time.frameCount % 300 == 0)
+            while (!_hostVerifying && !_tpVerifying && moving == null && _moveReqQueue.Count > 0)
+            {
+                var req = _moveReqQueue.Dequeue();
+                uint reqIdx = 0;
+                try { using var r = new BinaryReader(new MemoryStream(req.Buf)); r.ReadUInt32(); r.ReadByte(); reqIdx = r.ReadUInt32(); } catch { }
+                if (_canceledReqs.Remove(reqIdx)) { Log?.LogInfo($"[t] skipped canceled move request #{reqIdx}"); continue; }
+                HandleMoveRequest(req);
+                break;
+            }
+            if ((_hostVerifying || moving != null) && _moveReqQueue.Count > 0 && Time.frameCount % 300 == 0)
                 Log?.LogInfo($"[t] {_moveReqQueue.Count} move request(s) queued behind the current move");
         }
 
@@ -1202,6 +1615,15 @@ namespace RaftMovableStorage
             var player = ComponentManager<Network_Player>.Value;
             var bc = player?.BlockCreator;
             if (bc == null) { SendMoveRefusal(req.Sender, origIndex, "host is not ready (no BlockCreator)."); return; }
+
+            // SAME PREFAB VARIANT -> teleport (see ConfirmMove): the type-7 notify doubles as the
+            // success signal for the requesting client.
+            if (SameVariant(original, item, dps))
+            {
+                Log?.LogInfo($"[t] teleport '{item.UniqueName}' #{origIndex} -> {pos.ToString("F2")}");
+                BeginTeleport(original, pos, rot, req.Sender);
+                return;
+            }
 
             // authoritative capture from the original block (host owns the real state)
             var slots = (original is Storage_Small st && st.GetInventoryReference() != null)
@@ -1262,10 +1684,36 @@ namespace RaftMovableStorage
             {
                 if (Time.frameCount > _clientMoveDeadlineFrame)
                 {
-                    RestoreHidden();
-                    _pendingClientMoveOriginal = null; _awaitingHostMove = false;
-                    _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                    Note("client: host didn't move it in time; left where it was.");
+                    var np = ComponentManager<Network_Player>.Value;
+                    var hostId = np?.Network != null ? np.Network.CurrentSteamHost : default;
+                    if (!_cmAcked)
+                    {
+                        // The request never reached the host (no ack) - CANCEL it before restoring the
+                        // original. Per-peer FIFO on the reliable channel means the cancel drains ahead
+                        // of any retry, so the host can never execute this stale request later (the
+                        // split-brain that made zombie chests: >10s transit -> we gave up + retried ->
+                        // host executed the old request anyway).
+                        SendMoveCtl(hostId, 4, _pendingClientMoveOriginal.ObjectIndex);
+                        RestoreHidden();
+                        _pendingClientMoveOriginal = null; _awaitingHostMove = false;
+                        _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                        Note("client: the host never received the request; left where it was.");
+                    }
+                    else if (!_cmProbeSent)
+                    {
+                        // acked but the verdict is overdue - ask whether the original still exists there
+                        SendMoveCtl(hostId, 5, _pendingClientMoveOriginal.ObjectIndex);
+                        _cmProbeSent = true; _clientMoveDeadlineFrame = Time.frameCount + 600;
+                        Log?.LogInfo("[t] verdict overdue - probing the host for the original");
+                    }
+                    else
+                    {
+                        // probe also unanswered - the link is gone; keep the original, nothing lost
+                        RestoreHidden();
+                        _pendingClientMoveOriginal = null; _awaitingHostMove = false;
+                        _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                        Note("client: no answer from the host; left where it was.");
+                    }
                 }
                 return;
             }
@@ -1283,16 +1731,26 @@ namespace RaftMovableStorage
                     if (d < bestSqr) { bestSqr = d; best = b; }
                 }
                 if (best != null && !_cmSeenLogged) { Log?.LogInfo($"[t] new block first seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request (stable={best.IsStable()})"); _cmSeenLogged = true; }
-                if (best != null && best.IsStable())
+                bool graceOver = Time.frameCount > _clientMoveDeadlineFrame + 180;
+                if (best != null && (best.IsStable() || graceOver))
                 {
+                    // grace expiring with the block present but never reading stable: restore anyway -
+                    // silently dropping the restore here is what lost paint/contents on the client's view.
+                    if (!best.IsStable()) Log?.LogWarning("client: new block never read stable locally; restoring its state anyway.");
                     var player = ComponentManager<Network_Player>.Value;
                     try { ApplyState(best, _clientMoveSlots, _clientMoveRgd, _clientMovePaint, _clientMoveText, player); }
                     catch (System.Exception ex) { Log?.LogWarning("client local restore: " + ex.Message); }
                     _clientMoveRestored = true;
                 }
-                else if (Time.frameCount <= _clientMoveDeadlineFrame + 180)
+                else if (!graceOver)
                 {
                     return; // grace: give the new block a moment to arrive/settle
+                }
+                else
+                {
+                    // the host removed the original (phase 1 passed) but no new block ever showed up
+                    // near our ghost position - say so instead of claiming success.
+                    Log?.LogWarning($"client: original removed but no new block appeared within 1m of {_clientMovePos.ToString("F2")}; local state not re-applied.");
                 }
             }
 
@@ -1342,6 +1800,7 @@ namespace RaftMovableStorage
                 {
                     DiscardNewDependents();
                     RestoreDependentColliders();
+                    _plantBroadcastPlots.Clear(); // undone move - nothing to announce
                     DeregisterCropplotPlants(nb); // its restored plants are registered - don't shadow the surviving original
                     try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
                     RestoreHidden();
@@ -1360,6 +1819,10 @@ namespace RaftMovableStorage
                 _depOriginals.Clear(); _depColliderDisabled.Clear(); _newDependents.Clear();
                 if (original != null) { DeregisterCropplotPlants(original); try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
 
+                // originals are gone on every peer (reliable ordered channel) - now announce the moved
+                // plants so clients recreate them through the game's own planting path (harvest-linked).
+                FlushPlantBroadcasts(player);
+
                 int restored = slots?.Length ?? 0;
                 Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"
                     + (restored > 0 ? $"; restored {restored} slots" : "")
@@ -1371,6 +1834,7 @@ namespace RaftMovableStorage
 
             if (Time.realtimeSinceStartup > _hostVerifyDeadlineTime)
             {
+                _plantBroadcastPlots.Clear(); // undone move - nothing to announce
                 DeregisterCropplotPlants(_hostNb); // undo path: the new block's registered plants must not shadow the original
                 try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
                 RestoreHidden();
