@@ -46,6 +46,7 @@ namespace PickUpMove
 
         public static ConfigEntry<KeyboardShortcut> MoveKey;
         public static ConfigEntry<bool> RelayLogs;
+        public static ConfigEntry<bool> LogToConsole;
         public static ManualLogSource Log;
 
         // carry-mode state. `moving` is the block being carried (any Placeable block, not just storage).
@@ -144,13 +145,22 @@ namespace PickUpMove
                 "Aim at a storage and press this to pick it up (with its contents) into placement mode. " +
                 "Left-click to drop it at the new spot. Press the key again or right-click to cancel.");
 
+            LogToConsole = Config.Bind(
+                "Logging",
+                "LogToConsole",
+                false,
+                "Show this mod's diagnostic lines in the BepInEx console / LogOutput.log. Off by default " +
+                "for a quiet game; turn on to watch what the mod is doing. Warnings and errors always show, " +
+                "and the one load line (with the build stamp) always shows.");
+            LogConsole = LogToConsole.Value;
+
             RelayLogs = Config.Bind(
-                "General",
+                "Logging",
                 "RelayLogs",
-                true,
-                "Write this mod's log lines to per-session files (BepInEx/PickUpMoveLogs/) and, when " +
-                "playing as a client, relay them to the host so multiplayer issues can be diagnosed " +
-                "from one machine. Only this mod's own lines are sent.");
+                false,
+                "Debug aid, off by default. Write this mod's lines to per-session files " +
+                "(BepInEx/PickUpMoveLogs/) and, when playing as a client, relay them to the host so a " +
+                "co-op issue can be diagnosed from one machine. Only this mod's own lines are sent.");
             LogRelay.Init(RelayLogs.Value);
 
             // Own DontDestroyOnLoad ticker: BaseUnityPlugin.Update is not pumped in this env and the
@@ -164,9 +174,9 @@ namespace PickUpMove
             // ONE Harmony postfix for the in-world "Move" key hint (see architecture note). Invoked by
             // the game's raycast system, independent of our Update; patches persist past Awake.
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
-            catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
+            catch (System.Exception ex) { Warn("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build {BuildStamp.Value}) loaded. Move key = {MoveKey.Value}.");
+            Announce($"{Info.Metadata.Name} {Info.Metadata.Version} (build {BuildStamp.Value}) loaded. Move key = {MoveKey.Value}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
@@ -202,13 +212,30 @@ namespace PickUpMove
         // NoteHud = player-actionable feedback (refusals, declines, timeouts) - log + 2.5s HUD line.
         // tp8 painted EVERY note on the HUD and the chatter drowned the screen.
         private static string _hudNote; private static float _hudNoteUntil;
-        internal static void Note(string msg) => Log?.LogInfo(msg);
+        // Two INDEPENDENT log sinks, each config-gated:
+        //   console (LogToConsole)  -> BepInEx console / LogOutput.log. Off by default for a quiet
+        //                              release; warnings+errors ALWAYS surface so a bug report keeps them.
+        //   relay   (RelayLogs)     -> per-session files + client->host relay (see LogRelay). Off by default.
+        // Note/Trace/Warn/Err all funnel through Emit; nothing else in the mod touches Log directly
+        // (except Announce, the one always-on load banner that build-stamp verification reads back).
+        internal static bool LogConsole;   // = LogToConsole.Value, set in Awake
+        internal static void Note(string msg)  => Emit(LogLevel.Info, msg);
+        internal static void Trace(string msg) => Emit(LogLevel.Debug, msg);
+        internal static void Warn(string msg)  => Emit(LogLevel.Warning, msg);
+        internal static void Err(string msg)   => Emit(LogLevel.Error, msg);
+        private static void Emit(LogLevel lvl, string msg)
+        {
+            if (LogConsole || lvl >= LogLevel.Warning) Log?.Log(lvl, msg);
+            LogRelay.Record(lvl, msg);
+        }
+        // Always visible regardless of LogToConsole: the single load line (raft-ship reads the build
+        // stamp back from it) and anything a supporter must see even in a quiet install.
+        internal static void Announce(string msg) { Log?.Log(LogLevel.Info, msg); LogRelay.Record(LogLevel.Info, msg); }
         internal static void NoteHud(string msg)
         {
-            Log?.LogInfo(msg);
+            Note(msg); // log part gated by LogToConsole; the HUD line below is player feedback, never gated
             _hudNote = msg; _hudNoteUntil = Time.realtimeSinceStartup + 2.5f;
         }
-        internal static void Trace(string msg) => Log?.LogDebug(msg);
 
         // Per-frame logic, driven by Ticker.
         internal static void Tick()
@@ -579,9 +606,9 @@ namespace PickUpMove
                         if (nid != null) { NetworkIDManager.RemoveNetworkID(nid, typeof(PickupItem_Networked)); removed++; }
                     }
                 }
-                if (removed > 0) Log?.LogInfo($"[cropdiag] dereg {removed} plant networkID(s) before removing block #{b.ObjectIndex}");
+                if (removed > 0) Note($"[cropdiag] dereg {removed} plant networkID(s) before removing block #{b.ObjectIndex}");
             }
-            catch (System.Exception ex) { Log?.LogWarning("[cropdiag] dereg " + ex.Message); }
+            catch (System.Exception ex) { Warn("[cropdiag] dereg " + ex.Message); }
         }
 
         // HOST -> clients: re-announce every plant on the moved cropplot(s) through the game's own
@@ -635,7 +662,7 @@ namespace PickUpMove
                     }
                 }
             }
-            catch (System.Exception ex) { Log?.LogWarning("plant broadcast: " + ex.Message); }
+            catch (System.Exception ex) { Warn("plant broadcast: " + ex.Message); }
             _plantBroadcastPlots.Clear();
         }
 
@@ -657,11 +684,11 @@ namespace PickUpMove
                         try { hit = sc.requiredGizmoColliders[i].IsColliding(false, LayerMasks.MASK_Block, 0.99f); } catch { }
                         if (hit) hits++; else { miss.Append(i); miss.Append(' '); }
                     }
-                    Log?.LogInfo($"[stab] '{b.buildableItem?.UniqueName}' comp '{sc.gameObject.name}': hits={hits}/{total}"
+                    Note($"[stab] '{b.buildableItem?.UniqueName}' comp '{sc.gameObject.name}': hits={hits}/{total}"
                         + $" requireAll={sc.requireAll} need={sc.requiredHitCount}" + (miss.Length > 0 ? $" missing: {miss}" : ""));
                 }
             }
-            catch (System.Exception ex) { Log?.LogWarning("[stab] " + ex.Message); }
+            catch (System.Exception ex) { Warn("[stab] " + ex.Message); }
         }
 
         // Replay captured device state onto the recreated block via the game's own load-path restore
@@ -726,7 +753,7 @@ namespace PickUpMove
                                         NetworkIDManager.AddNetworkID(nid); // idempotent - HashSet add
                                     }
                             }
-                            catch (System.Exception ex) { Log?.LogWarning("plant re-register: " + ex.Message); }
+                            catch (System.Exception ex) { Warn("plant re-register: " + ex.Message); }
 
                             // queue for the post-removal broadcast to clients (see FlushPlantBroadcasts)
                             _plantBroadcastPlots.Add(plot);
@@ -776,13 +803,13 @@ namespace PickUpMove
                         var recv = nb.GetComponent<Reciever>();
                         if (recv != null)
                         {
-                            try { recv.Restore(rcv); } catch (System.Exception rex) { Log?.LogWarning("reciever restore: " + rex.Message); }
+                            try { recv.Restore(rcv); } catch (System.Exception rex) { Warn("reciever restore: " + rex.Message); }
                             try { recv.StartCoroutine(rcv.RestoreLate(0.5f, recv)); } catch { }
                         }
                         break;
                 }
             }
-            catch (System.Exception ex) { Log?.LogWarning("device restore failed: " + ex.Message); }
+            catch (System.Exception ex) { Warn("device restore failed: " + ex.Message); }
         }
 
         // Full save snapshot used to replay self-restoring device state on the recreated block.
@@ -890,7 +917,7 @@ namespace PickUpMove
                         else
                             player.SendP2P(sync, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game); // client -> host, like the old storage path
                     }
-                    catch (System.Exception ex) { Log?.LogWarning("content-sync send failed: " + ex.Message); }
+                    catch (System.Exception ex) { Warn("content-sync send failed: " + ex.Message); }
                 }
             }
             ApplyDeviceState(rgd, nb);
@@ -947,7 +974,7 @@ namespace PickUpMove
                             foreach (var rc in restored) rc.enabled = false;
                         }
                         catch { }
-                        Log?.LogInfo($"[dep] '{(pbi != null ? pbi.UniqueName : pb.name)}' reads unstable near '{(hb.buildableItem != null ? hb.buildableItem.UniqueName : hb.name)}'"
+                        Note($"[dep] '{(pbi != null ? pbi.UniqueName : pb.name)}' reads unstable near '{(hb.buildableItem != null ? hb.buildableItem.UniqueName : hb.name)}'"
                             + $" dist={Vector3.Distance(pb.transform.position, hb.transform.position):F2} preUnstable={preUnstable} pos={pb.transform.localPosition.ToString("F2")}");
                         // ALREADY unstable before this move (chronic neighbour - e.g. a fence on a window
                         // whose gizmo never finds support): not resting on us, not our business. Refusing
@@ -1049,7 +1076,7 @@ namespace PickUpMove
                 var tw = nb.GetComponentInChildren<TextWriterObject>();
                 if (tw != null) tw.SetTextNetworked(text);
             }
-            catch (System.Exception ex) { Log?.LogWarning("sign text restore failed: " + ex.Message); }
+            catch (System.Exception ex) { Warn("sign text restore failed: " + ex.Message); }
         }
 
         private static Paint CapturePaint(Block b) => new Paint
@@ -1073,7 +1100,7 @@ namespace PickUpMove
                 nb.SetInstanceColorAndPattern(p.cA, p.pcA, 1, p.pi1);
                 nb.SetInstanceColorAndPattern(p.cB, p.pcB, 2, p.pi2);
             }
-            catch (System.Exception ex) { Log?.LogWarning("paint apply failed: " + ex.Message); }
+            catch (System.Exception ex) { Warn("paint apply failed: " + ex.Message); }
 
             if (player?.Network == null) return;
             var pos = nb.transform.localPosition;
@@ -1087,7 +1114,7 @@ namespace PickUpMove
                 if (p.cA != null) SendPaint(player, nb.ObjectIndex, pos, p.cA, p.pcA != null ? p.pcA : p.cA, 1, p.pi1);
                 if (p.cB != null) SendPaint(player, nb.ObjectIndex, pos, p.cB, p.pcB != null ? p.pcB : p.cB, 2, p.pi2);
             }
-            catch (System.Exception ex) { Log?.LogWarning("paint network failed: " + ex.Message); }
+            catch (System.Exception ex) { Warn("paint network failed: " + ex.Message); }
         }
 
         private static void SendPaint(Network_Player player, uint boi, Vector3 pos,
@@ -1139,7 +1166,7 @@ namespace PickUpMove
                 t.Field("isRotating").SetValue(false);
                 t.Method("DestroyGhostBlock").GetValue();
             }
-            catch (System.Exception ex) { Log?.LogWarning("exit build: " + ex.Message); }
+            catch (System.Exception ex) { Warn("exit build: " + ex.Message); }
             bc.SetGhostBlockVisibility(false);
             // If the move ENABLED the BlockCreator (no hammer equipped), disable it again: enabled, its
             // Update draws the 'BuildMenu' prompt and RMB opens the build menu with ANY item in hands.
@@ -1205,14 +1232,14 @@ namespace PickUpMove
                 try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
                 catch (System.Exception ex)
                 {
-                    Log?.LogWarning("place failed (CreateBlockCheat threw): " + ex.Message + "; chest left where it was.");
+                    Warn("place failed (CreateBlockCheat threw): " + ex.Message + "; chest left where it was.");
                     AbortKeepOriginal();
                     return;
                 }
 
                 if (nb == null)
                 {
-                    Log?.LogWarning("place produced no block; original left where it was.");
+                    Warn("place produced no block; original left where it was.");
                     AbortKeepOriginal();
                     return;
                 }
@@ -1253,7 +1280,7 @@ namespace PickUpMove
                     // trip (the host enforces it authoritatively anyway via refusal relay)
                     if (!SameVariant(original, item, dps) && HasUnhandledState(original))
                     { NoteHud(Loc.T("surface")); return; }
-                    if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
+                    if (player.Network == null) { Warn("client move: no Network."); AbortKeepOriginal(); return; }
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
                     { NoteHud(Loc.T("no_host")); AbortKeepOriginal(); return; }
                     _cmSentTime = Time.realtimeSinceStartup; _cmOrigGoneLogged = false; _cmSeenLogged = false;
@@ -1305,7 +1332,7 @@ namespace PickUpMove
                 return Steamworks.SteamNetworking.SendP2PPacket(host, data, (uint)data.Length,
                     Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
             }
-            catch (System.Exception ex) { Log?.LogWarning("send move req: " + ex.Message); return false; }
+            catch (System.Exception ex) { Warn("send move req: " + ex.Message); return false; }
         }
 
         // HOST -> CLIENT: tell the requester WHY a move was declined so it can restore its original
@@ -1328,7 +1355,7 @@ namespace PickUpMove
                 Steamworks.SteamNetworking.SendP2PPacket(to, data, (uint)data.Length,
                     Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
             }
-            catch (System.Exception ex) { Log?.LogWarning("send refusal: " + ex.Message); }
+            catch (System.Exception ex) { Warn("send refusal: " + ex.Message); }
         }
 
         // CLIENT: drain refusal packets from the host (type 2 on the private channel).
@@ -1366,7 +1393,7 @@ namespace PickUpMove
                                 _cmAcked = true;
                                 _clientMoveDeadlineFrame = Time.frameCount + 1800; // verdict failsafe, not a guess window
                                 float dt = Time.realtimeSinceStartup - _cmSentTime;
-                                Log?.LogInfo($"[t] host acked after {dt:F2}s");
+                                Note($"[t] host acked after {dt:F2}s");
                                 if (dt > 3f) NoteHud(Loc.T("working"));
                             }
                         }
@@ -1385,7 +1412,7 @@ namespace PickUpMove
                                 RestoreHidden();
                                 _pendingClientMoveOriginal = null; _awaitingHostMove = false;
                                 _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                                Log?.LogInfo($"[t] teleported {Time.realtimeSinceStartup - _cmSentTime:F2}s after request");
+                                Note($"[t] teleported {Time.realtimeSinceStartup - _cmSentTime:F2}s after request");
                                 Note("client: host moved it.");
                             }
                         }
@@ -1423,7 +1450,7 @@ namespace PickUpMove
                                     _pendingClientMoveOriginal = null;
                                     _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
                                     try { BlockCreator.RemoveBlock(z, null, true); }
-                                    catch (System.Exception ex) { Log?.LogWarning("zombie cleanup: " + ex.Message); }
+                                    catch (System.Exception ex) { Warn("zombie cleanup: " + ex.Message); }
                                     _clientMoveDeadlineFrame = Time.frameCount; // phase 2 grace runs from now
                                     Note("client: the host moved it but the confirmation was lost - cleaned up the stale copy.");
                                 }
@@ -1433,7 +1460,7 @@ namespace PickUpMove
                     catch { }
                 }
             }
-            catch (System.Exception ex) { Log?.LogWarning("refusal poll: " + ex.Message); }
+            catch (System.Exception ex) { Warn("refusal poll: " + ex.Message); }
         }
 
         private sealed class MoveReq { public byte[] Buf; public Steamworks.CSteamID Sender; public float RecvTime; }
@@ -1482,7 +1509,7 @@ namespace PickUpMove
                 if (reqPrefab == null || original == null) return false;
                 string origBase = original.name.Replace("(Clone)", "").Trim();
                 bool same = origBase == reqPrefab.name;
-                if (!same) Log?.LogInfo($"[t] variant differs: orig='{origBase}' req='{reqPrefab.name}' (dps={dps}, origDps={original.dpsType}) -> recreate path");
+                if (!same) Note($"[t] variant differs: orig='{origBase}' req='{reqPrefab.name}' (dps={dps}, origDps={original.dpsType}) -> recreate path");
                 return same;
             }
             catch { return false; }
@@ -1503,7 +1530,7 @@ namespace PickUpMove
             if (!to.IsValid()) return;
             var payload = BuildTeleportPayload(idx, pos, rot);
             try { Steamworks.SteamNetworking.SendP2PPacket(to, payload, (uint)payload.Length, Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel); }
-            catch (System.Exception ex) { Log?.LogWarning("send teleport: " + ex.Message); }
+            catch (System.Exception ex) { Warn("send teleport: " + ex.Message); }
             // idempotent - repeat twice against session drops (a lost transform packet otherwise waits
             // for the probe to converge)
             _tpSends.Add(new TpSend { To = to, Payload = payload, Next = Time.realtimeSinceStartup + 1f, Left = 2 });
@@ -1625,7 +1652,7 @@ namespace PickUpMove
                 Steamworks.SteamNetworking.SendP2PPacket(to, data, (uint)data.Length,
                     Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
             }
-            catch (System.Exception ex) { Log?.LogWarning("send ctl: " + ex.Message); }
+            catch (System.Exception ex) { Warn("send ctl: " + ex.Message); }
         }
 
         // HOST: always drain the socket (so packets don't pile up in Steam's buffer), but run only ONE
@@ -1662,7 +1689,7 @@ namespace PickUpMove
                             break;
                         case 4: // cancel: drop the request if we haven't started it
                             _canceledReqs.Add(idx);
-                            Log?.LogInfo($"[t] client canceled move request for block #{idx}");
+                            Note($"[t] client canceled move request for block #{idx}");
                             break;
                         case 5: // probe: does this block still exist here? reply carries the current
                                 // transform so the client converges even when every notify was lost
@@ -1681,25 +1708,25 @@ namespace PickUpMove
                                     var data = ms.ToArray();
                                     Steamworks.SteamNetworking.SendP2PPacket(sender, data, (uint)data.Length, Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
                                 }
-                                catch (System.Exception ex) { Log?.LogWarning("probe reply: " + ex.Message); }
+                                catch (System.Exception ex) { Warn("probe reply: " + ex.Message); }
                             }
                             break;
                     }
                 }
             }
-            catch (System.Exception ex) { Log?.LogWarning("move req poll: " + ex.Message); }
+            catch (System.Exception ex) { Warn("move req poll: " + ex.Message); }
 
             while (!_hostVerifying && !_tpVerifying && moving == null && _moveReqQueue.Count > 0)
             {
                 var req = _moveReqQueue.Dequeue();
                 uint reqIdx = 0;
                 try { using var r = new BinaryReader(new MemoryStream(req.Buf)); r.ReadUInt32(); r.ReadByte(); reqIdx = r.ReadUInt32(); } catch { }
-                if (_canceledReqs.Remove(reqIdx)) { Log?.LogInfo($"[t] skipped canceled move request #{reqIdx}"); continue; }
+                if (_canceledReqs.Remove(reqIdx)) { Note($"[t] skipped canceled move request #{reqIdx}"); continue; }
                 HandleMoveRequest(req);
                 break;
             }
             if ((_hostVerifying || moving != null) && _moveReqQueue.Count > 0 && Time.frameCount % 300 == 0)
-                Log?.LogInfo($"[t] {_moveReqQueue.Count} move request(s) queued behind the current move");
+                Note($"[t] {_moveReqQueue.Count} move request(s) queued behind the current move");
         }
 
         // HOST: a client asked us to move a block. Capture its authoritative state and run the SAME
@@ -1732,7 +1759,7 @@ namespace PickUpMove
             // success signal for the requesting client.
             if (SameVariant(original, item, dps))
             {
-                Log?.LogInfo($"[t] teleport '{item.UniqueName}' #{origIndex} -> {pos.ToString("F2")}");
+                Note($"[t] teleport '{item.UniqueName}' #{origIndex} -> {pos.ToString("F2")}");
                 BeginTeleport(original, pos, rot, req.Sender);
                 return;
             }
@@ -1759,7 +1786,7 @@ namespace PickUpMove
             try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
             catch (System.Exception ex)
             {
-                Log?.LogWarning("client-move create: " + ex.Message); RestoreHidden();
+                Warn("client-move create: " + ex.Message); RestoreHidden();
                 SendMoveRefusal(req.Sender, origIndex, "r_no_place");
                 return;
             }
@@ -1771,11 +1798,11 @@ namespace PickUpMove
             }
             // [t] localize the first-move-of-type ~5s: how long the request waited in Steam's buffer/our
             // queue vs how long the actual instantiate took (per-type first-use asset warm-up suspect).
-            Log?.LogInfo($"[t] req '{item.UniqueName}': queue={tCreate - req.RecvTime:F2}s create={Time.realtimeSinceStartup - tCreate:F2}s");
+            Note($"[t] req '{item.UniqueName}': queue={tCreate - req.RecvTime:F2}s create={Time.realtimeSinceStartup - tCreate:F2}s");
 
             // [diag] compare what the client asked for against what we actually built - a recycler is
             // multi-cell so a small pos/rot/dps divergence makes its stability gizmos miss support.
-            Log?.LogInfo($"[diag] move '{item.UniqueName}': recv pos={pos.ToString("F3")} euler={rot.ToString("F3")} dps={dps}"
+            Note($"[diag] move '{item.UniqueName}': recv pos={pos.ToString("F3")} euler={rot.ToString("F3")} dps={dps}"
                 + $" -> built pos={nb.transform.localPosition.ToString("F3")} euler={nb.transform.localEulerAngles.ToString("F3")} dps={nb.dpsType}");
 
             _hostNb = nb; _hostOriginal = original; _hostSlots = slots; _hostText = text; _hostRgd = rgd; _hostPaint = paint;
@@ -1819,7 +1846,7 @@ namespace PickUpMove
                         // acked but the verdict is overdue - ask whether the original still exists there
                         SendMoveCtl(hostId, 5, _pendingClientMoveOriginal.ObjectIndex);
                         _cmProbeSent = true; _clientMoveDeadlineFrame = Time.frameCount + 600;
-                        Log?.LogInfo("[t] verdict overdue - probing the host for the original");
+                        Note("[t] verdict overdue - probing the host for the original");
                     }
                     else
                     {
@@ -1837,7 +1864,7 @@ namespace PickUpMove
             // and restore our local view on it.
             if (!_clientMoveRestored)
             {
-                if (!_cmOrigGoneLogged) { Log?.LogInfo($"[t] original removed {Time.realtimeSinceStartup - _cmSentTime:F2}s after request"); _cmOrigGoneLogged = true; }
+                if (!_cmOrigGoneLogged) { Note($"[t] original removed {Time.realtimeSinceStartup - _cmSentTime:F2}s after request"); _cmOrigGoneLogged = true; }
                 Block best = null; float bestSqr = 1f; // within ~1 unit of where we placed the ghost
                 foreach (var b in BlockCreator.GetPlacedBlocks())
                 {
@@ -1845,16 +1872,16 @@ namespace PickUpMove
                     float d = (b.transform.localPosition - _clientMovePos).sqrMagnitude;
                     if (d < bestSqr) { bestSqr = d; best = b; }
                 }
-                if (best != null && !_cmSeenLogged) { Log?.LogInfo($"[t] new block first seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request (stable={best.IsStable()})"); _cmSeenLogged = true; }
+                if (best != null && !_cmSeenLogged) { Note($"[t] new block first seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request (stable={best.IsStable()})"); _cmSeenLogged = true; }
                 bool graceOver = Time.frameCount > _clientMoveDeadlineFrame + 180;
                 if (best != null && (best.IsStable() || graceOver))
                 {
                     // grace expiring with the block present but never reading stable: restore anyway -
                     // silently dropping the restore here is what lost paint/contents on the client's view.
-                    if (!best.IsStable()) Log?.LogWarning("client: new block never read stable locally; restoring its state anyway.");
+                    if (!best.IsStable()) Warn("client: new block never read stable locally; restoring its state anyway.");
                     var player = ComponentManager<Network_Player>.Value;
                     try { ApplyState(best, _clientMoveSlots, _clientMoveRgd, _clientMovePaint, _clientMoveText, player); }
-                    catch (System.Exception ex) { Log?.LogWarning("client local restore: " + ex.Message); }
+                    catch (System.Exception ex) { Warn("client local restore: " + ex.Message); }
                     _clientMoveRestored = true;
                 }
                 else if (!graceOver)
@@ -1865,14 +1892,14 @@ namespace PickUpMove
                 {
                     // the host removed the original (phase 1 passed) but no new block ever showed up
                     // near our ghost position - say so instead of claiming success.
-                    Log?.LogWarning($"client: original removed but no new block appeared within 1m of {_clientMovePos.ToString("F2")}; local state not re-applied.");
+                    Warn($"client: original removed but no new block appeared within 1m of {_clientMovePos.ToString("F2")}; local state not re-applied.");
                 }
             }
 
             _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
             _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
             _awaitingHostMove = false;
-            Log?.LogInfo($"[t] client move total {Time.realtimeSinceStartup - _cmSentTime:F2}s (request -> restored)");
+            Note($"[t] client move total {Time.realtimeSinceStartup - _cmSentTime:F2}s (request -> restored)");
             Note("client: host moved it.");
         }
 
@@ -1883,7 +1910,7 @@ namespace PickUpMove
                 RestoreHidden();
                 if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "r_move_failed");
                 _hostVerifying = false; _hostOriginal = null; _hostSlots = null; _hostReqSender = default;
-                Log?.LogWarning("host verify: placed chest vanished before settling; original restored, nothing lost.");
+                Warn("host verify: placed chest vanished before settling; original restored, nothing lost.");
                 return;
             }
 
@@ -1942,7 +1969,7 @@ namespace PickUpMove
                 Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"
                     + (restored > 0 ? $"; restored {restored} slots" : "")
                     + (_depMovedCount > 0 ? $"; moved {_depMovedCount} on top" : ""));
-                if (_hostReqSender.IsValid()) Log?.LogInfo($"[t] client move total {Time.realtimeSinceStartup - _hostReqRecvTime:F2}s (recv -> original removed)");
+                if (_hostReqSender.IsValid()) Note($"[t] client move total {Time.realtimeSinceStartup - _hostReqRecvTime:F2}s (recv -> original removed)");
                 _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
                 return;
             }
@@ -1967,7 +1994,7 @@ namespace PickUpMove
                 // host never spawned the chest -> un-hide the original we kept; nothing lost
                 RestoreHidden();
                 _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null;
-                Log?.LogWarning("client sync: host didn't place the chest in time; original restored, nothing lost.");
+                Warn("client sync: host didn't place the chest in time; original restored, nothing lost.");
                 return;
             }
             if (StorageManager.allStorages == null) return;
@@ -1981,7 +2008,7 @@ namespace PickUpMove
                 if (d < bestSqr) { bestSqr = d; best = s; }
             }
             if (best == null) return; // host's reply hasn't spawned it yet
-            if (!_cmSeenLogged) { Log?.LogInfo($"[t] chest first seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request"); _cmSeenLogged = true; }
+            if (!_cmSeenLogged) { Note($"[t] chest first seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request"); _cmSeenLogged = true; }
 
             var player = ComponentManager<Network_Player>.Value;
             if (player?.Network == null) { RestoreHidden(); _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null; return; }
@@ -2008,7 +2035,7 @@ namespace PickUpMove
                 }
                 Note($"client sync: pushed {_syncSlots?.Length ?? 0} slots for chest #{best.ObjectIndex}.");
             }
-            catch (System.Exception ex) { Log?.LogWarning("client sync RPC failed: " + ex.Message); }
+            catch (System.Exception ex) { Warn("client sync RPC failed: " + ex.Message); }
 
             // stable + filled -> NOW it is safe to delete the original we kept hidden
             _hiddenColliders.Clear();

@@ -37,7 +37,21 @@ namespace PickUpMove
             _stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
             _dir = Path.Combine(Paths.BepInExRootPath, "PickUpMoveLogs");
             try { Directory.CreateDirectory(_dir); } catch { }
-            try { BepInEx.Logging.Logger.Listeners.Add(new Listener()); } catch { }
+        }
+
+        // Fed directly by Plugin.Emit (no BepInEx log-bus hook), so the file/relay sink is INDEPENDENT
+        // of whether lines also go to the console. No-op unless RelayLogs enabled this session.
+        internal static void Record(LogLevel level, string data)
+        {
+            if (!_enabled) return;
+            try
+            {
+                var line = $"[{DateTime.Now:HH:mm:ss}] [{level,-7}] {data}";
+                if (_selfFile == null) _selfFile = OpenWriter($"self-{_stamp}.log");
+                _selfFile?.WriteLine(line);
+                if (_outbox.Count < MaxQueued) _outbox.Enqueue(line); // role decided at flush time
+            }
+            catch { }
         }
 
         private static StreamWriter OpenWriter(string name)
@@ -48,25 +62,6 @@ namespace PickUpMove
                 return w;
             }
             catch { return null; }
-        }
-
-        // NEVER log from inside the listener (feedback loop) - swallow everything.
-        private sealed class Listener : ILogListener
-        {
-            public void LogEvent(object sender, LogEventArgs e)
-            {
-                try
-                {
-                    if (e?.Source?.SourceName != "Pick Up & Move") return;
-                    var line = $"[{DateTime.Now:HH:mm:ss}] [{e.Level,-7}] {e.Data}";
-                    if (_selfFile == null) _selfFile = OpenWriter($"self-{_stamp}.log");
-                    _selfFile?.WriteLine(line);
-                    // queue for relay; role is decided at FLUSH time (host clears, client sends)
-                    if (_outbox.Count < MaxQueued) _outbox.Enqueue(line);
-                }
-                catch { }
-            }
-            public void Dispose() { try { _selfFile?.Flush(); _clientFile?.Flush(); } catch { } }
         }
 
         // called from Plugin.Tick every frame (both roles), all failures silent
