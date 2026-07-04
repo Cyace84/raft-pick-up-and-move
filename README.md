@@ -5,7 +5,7 @@ the normal build ghost follows your cursor until you click to set it back down â
 and state intact.
 
 It moves crafted **placeables** (storage, devices, decor), **not** the raft structure itself
-(foundations, walls, floors, pillars, pipes). No more emptying a chest into your hands just to nudge
+(foundations, walls, floors, pillars). No more emptying a chest into your hands just to nudge
 it one tile over.
 
 ## What it moves (keeping state)
@@ -22,7 +22,7 @@ it simply **refuses to move** rather than risk losing that state. Nothing is eve
 ## Install
 
 1. Install [BepInEx 5](https://docs.bepinex.dev/) (Mono build) for Raft.
-2. Put `RaftMovableStorage.dll` in `Raft/BepInEx/plugins/`.
+2. Put `PickUpMove.dll` in `Raft/BepInEx/plugins/`.
 3. Start the game once so the config file gets written.
 
 ## How to use
@@ -31,11 +31,14 @@ Look at a movable object and press the move key (default `M`). It lifts into pla
 ghost tracks your aim. Left-click to place it. Right-click, or press the key again, to cancel and
 leave it where it was.
 
-Change the key in `BepInEx/config/com.cyace84.raftmovablestorage.cfg`.
+Change the key in `BepInEx/config/com.cyace84.pickupmove.cfg`.
 
 ## Multiplayer
 
-Works in co-op, as host or as a client. Only the player moving an object needs the mod.
+Works in co-op, as host or as a client â€” anyone with the mod can move things. To *see* a move
+happen live, a player needs the mod too: moves travel over the mod's own channel, so a modless
+peer won't see the object shift until they rejoin (the new position is saved, so it's correct
+after a reload). For a clean co-op experience, everyone should run the mod.
 
 ## Build from source
 
