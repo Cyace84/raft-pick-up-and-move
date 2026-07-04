@@ -229,7 +229,7 @@ namespace PickUpMove
                 // or its removal reference (never removed => duplicate). Moves are near-instant when they
                 // work, and every pending state self-resolves on a <=10s timeout, so this never locks up.
                 else if (_awaitingClientChest || _awaitingHostMove || _hostVerifying || _tpVerifying)
-                    NoteHud("Finishing the previous move. Try again in a moment.");
+                    NoteHud(Loc.T("busy"));
                 else TryBeginMove();
                 return;
             }
@@ -285,9 +285,9 @@ namespace PickUpMove
             // - A zipline with a rope strung: teleporting one end leaves the rope hanging mid-air
             //   (MeshPath connections don't follow). Detach first, then move. (v2 idea: drag the rope.)
             if (block is Block_DetailPlank)
-            { NoteHud("This plank is stretched between two points and can't be carried."); return; }
+            { NoteHud(Loc.T("plank")); return; }
             if (HasAttachedRope(block))
-            { NoteHud("Detach the rope before moving the zipline."); return; }
+            { NoteHud(Loc.T("rope")); return; }
 
             // STATE GATE moved to placement time: since the teleport pivot, a same-variant move keeps
             // the SAME object - all state (scarecrow integrity, beehive combs, charger batteries+fuel,
@@ -465,7 +465,7 @@ namespace PickUpMove
             if (dtm == null) return;
             // ADD our line at index 1 WITHOUT clearing - keeps the game's 'X' remove/pickup prompt at
             // index 0 and stacks 'M Move' under it (same slot the storage postfix uses).
-            dtm.ShowText("Move", MoveKey.Value.MainKey, 1, 0, false);
+            dtm.ShowText(Loc.T("move"), MoveKey.Value.MainKey, 1, 0, false);
             _hintShown = true;
         }
         // One legacy-uGUI Text ABOVE the vanilla bottom-prompt row, styled from the prompt font.
@@ -1200,7 +1200,7 @@ namespace PickUpMove
                 // a stateful type we have no adapter for must not be rebuilt (state would be lost).
                 // Those are teleport-only: same surface type keeps the same prefab -> same object.
                 if (HasUnhandledState(original))
-                { NoteHud("It only keeps its contents on the same surface type."); return; }
+                { NoteHud(Loc.T("surface")); return; }
                 Block nb;
                 try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
                 catch (System.Exception ex)
@@ -1252,10 +1252,10 @@ namespace PickUpMove
                     // same teleport-only gate as the host branch, checked locally to save the round
                     // trip (the host enforces it authoritatively anyway via refusal relay)
                     if (!SameVariant(original, item, dps) && HasUnhandledState(original))
-                    { NoteHud("It only keeps its contents on the same surface type."); return; }
+                    { NoteHud(Loc.T("surface")); return; }
                     if (player.Network == null) { Log?.LogWarning("client move: no Network."); AbortKeepOriginal(); return; }
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
-                    { NoteHud("Couldn't reach the host. Left where it was."); AbortKeepOriginal(); return; }
+                    { NoteHud(Loc.T("no_host")); AbortKeepOriginal(); return; }
                     _cmSentTime = Time.realtimeSinceStartup; _cmOrigGoneLogged = false; _cmSeenLogged = false;
                     _cmAcked = false; _cmProbeSent = false;
                     // remember our captured state + snapshot existing blocks so we can find the new one
@@ -1356,7 +1356,7 @@ namespace PickUpMove
                                 RestoreHidden();
                                 _pendingClientMoveOriginal = null; _awaitingHostMove = false;
                                 _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                                NoteHud(reason);
+                                NoteHud(Loc.T(reason));
                             }
                         }
                         else if (kind == 3) // ack: the host has the request; it WILL answer - extend the wait
@@ -1367,7 +1367,7 @@ namespace PickUpMove
                                 _clientMoveDeadlineFrame = Time.frameCount + 1800; // verdict failsafe, not a guess window
                                 float dt = Time.realtimeSinceStartup - _cmSentTime;
                                 Log?.LogInfo($"[t] host acked after {dt:F2}s");
-                                if (dt > 3f) NoteHud("Still working on it...");
+                                if (dt > 3f) NoteHud(Loc.T("working"));
                             }
                         }
                         else if (kind == 7) // teleport notify: the block MOVED (same object, all state intact)
@@ -1601,8 +1601,8 @@ namespace PickUpMove
                 _tpBlock.transform.localPosition = _tpOldPos;
                 _tpBlock.transform.localEulerAngles = _tpOldRot;
                 Physics.SyncTransforms();
-                NoteHud("Can't place there. No support. Left where it was.");
-                if (_tpReqSender.IsValid()) SendMoveRefusal(_tpReqSender, _tpBlock.ObjectIndex, "That spot has no support. Left where it was.");
+                NoteHud(Loc.T("no_support"));
+                if (_tpReqSender.IsValid()) SendMoveRefusal(_tpReqSender, _tpBlock.ObjectIndex, "no_support");
                 _tpBlock = null; _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
                 _tpVerifying = false; _tpReqSender = default;
             }
@@ -1721,12 +1721,12 @@ namespace PickUpMove
             catch { return; }
 
             var original = BlockCreator.GetBlockByObjectIndex(origIndex);
-            if (original == null) { SendMoveRefusal(req.Sender, origIndex, "The host couldn't find that block."); return; }
+            if (original == null) { SendMoveRefusal(req.Sender, origIndex, "r_not_found"); return; }
             var item = original.buildableItem;
-            if (item == null) { SendMoveRefusal(req.Sender, origIndex, "That block can't be rebuilt on the host."); return; }
+            if (item == null) { SendMoveRefusal(req.Sender, origIndex, "r_no_rebuild"); return; }
             var player = ComponentManager<Network_Player>.Value;
             var bc = player?.BlockCreator;
-            if (bc == null) { SendMoveRefusal(req.Sender, origIndex, "The host isn't ready. Try again in a moment."); return; }
+            if (bc == null) { SendMoveRefusal(req.Sender, origIndex, "r_not_ready"); return; }
 
             // SAME PREFAB VARIANT -> teleport (see ConfirmMove): the type-7 notify doubles as the
             // success signal for the requesting client.
@@ -1738,7 +1738,7 @@ namespace PickUpMove
             }
             // teleport-only types must not be rebuilt (unhandled state would be lost)
             if (HasUnhandledState(original))
-            { SendMoveRefusal(req.Sender, origIndex, "It only keeps its contents on the same surface type."); return; }
+            { SendMoveRefusal(req.Sender, origIndex, "surface"); return; }
 
             // authoritative capture from the original block (host owns the real state)
             var slots = (original is Storage_Small st && st.GetInventoryReference() != null)
@@ -1760,13 +1760,13 @@ namespace PickUpMove
             catch (System.Exception ex)
             {
                 Log?.LogWarning("client-move create: " + ex.Message); RestoreHidden();
-                SendMoveRefusal(req.Sender, origIndex, "The host couldn't place it there.");
+                SendMoveRefusal(req.Sender, origIndex, "r_no_place");
                 return;
             }
             if (nb == null)
             {
                 RestoreHidden();
-                SendMoveRefusal(req.Sender, origIndex, "The host couldn't place it there.");
+                SendMoveRefusal(req.Sender, origIndex, "r_no_place");
                 return;
             }
             // [t] localize the first-move-of-type ~5s: how long the request waited in Steam's buffer/our
@@ -1812,7 +1812,7 @@ namespace PickUpMove
                         RestoreHidden();
                         _pendingClientMoveOriginal = null; _awaitingHostMove = false;
                         _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                        NoteHud("The host didn't get the request. Left where it was.");
+                        NoteHud(Loc.T("no_request"));
                     }
                     else if (!_cmProbeSent)
                     {
@@ -1827,7 +1827,7 @@ namespace PickUpMove
                         RestoreHidden();
                         _pendingClientMoveOriginal = null; _awaitingHostMove = false;
                         _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
-                        NoteHud("No answer from the host. Left where it was.");
+                        NoteHud(Loc.T("no_answer"));
                     }
                 }
                 return;
@@ -1881,7 +1881,7 @@ namespace PickUpMove
             if (_hostNb == null)
             {
                 RestoreHidden();
-                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "The move failed on the host. Left where it was.");
+                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "r_move_failed");
                 _hostVerifying = false; _hostOriginal = null; _hostSlots = null; _hostReqSender = default;
                 Log?.LogWarning("host verify: placed chest vanished before settling; original restored, nothing lost.");
                 return;
@@ -1954,8 +1954,8 @@ namespace PickUpMove
                 try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
                 RestoreHidden();
                 LogStability(_hostNb); // which gizmo cell(s) never found support
-                Note("host place fail at +" + delta + "f"); NoteHud("Can't place there. No support. Left where it was.");
-                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "That spot has no support. Left where it was.");
+                Note("host place fail at +" + delta + "f"); NoteHud(Loc.T("no_support"));
+                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "no_support");
                 _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
             }
         }
@@ -1993,7 +1993,7 @@ namespace PickUpMove
                 try { BlockCreator.RemoveBlockNetwork(best, null, true); } catch { }
                 RestoreHidden();
                 _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null;
-                NoteHud("That spot wouldn't hold it. Left where it was.");
+                NoteHud(Loc.T("no_support"));
                 return;
             }
 
@@ -2039,7 +2039,7 @@ namespace PickUpMove
                 if (__instance == null || __instance.IsOpen) return;    // chest is open
                 var dtm = ComponentManager<DisplayTextManager>.Value;
                 if (dtm == null) return;
-                dtm.ShowText("Move", Plugin.MoveKey.Value.MainKey, 1, 0, false);
+                dtm.ShowText(Loc.T("move"), Plugin.MoveKey.Value.MainKey, 1, 0, false);
             }
             catch { }
         }
