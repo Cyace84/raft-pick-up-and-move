@@ -5,7 +5,7 @@ the normal build ghost follows your cursor until you click to set it back down â
 and state intact.
 
 It moves crafted **placeables** (storage, devices, decor), **not** the raft structure itself
-(foundations, walls, floors, pillars, pipes). No more emptying a chest into your hands just to nudge
+(foundations, walls, floors, pillars). No more emptying a chest into your hands just to nudge
 it one tile over.
 
 ## What it moves (keeping state)
