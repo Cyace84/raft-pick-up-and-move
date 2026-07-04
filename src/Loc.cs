@@ -50,8 +50,8 @@ namespace PickUpMove
         private static readonly Dictionary<string, Dictionary<string, string>> Table = new Dictionary<string, Dictionary<string, string>>
         {
             ["move"] = new Dictionary<string, string> {
-                ["en"]="Move", ["ru"]="Двигать", ["de"]="Bewegen", ["fr"]="Déplacer", ["sv"]="Flytta",
-                ["it"]="Sposta", ["pt"]="Mover", ["zh"]="移动", ["ja"]="移動", ["ko"]="이동" },
+                ["en"]="Move", ["ru"]="Переместить", ["de"]="Bewegen", ["fr"]="Déplacer", ["sv"]="Flytta",
+                ["it"]="Sposta", ["pt"]="Mover", ["zh"]="移动", ["ja"]="移動", ["ko"]="이동", ["pl"]="Przenieś" },
 
             ["busy"] = new Dictionary<string, string> {
                 ["en"]="Finishing the previous move. Try again in a moment.",
@@ -63,7 +63,7 @@ namespace PickUpMove
                 ["pt"]="Concluindo o movimento anterior. Tente novamente em um instante.",
                 ["zh"]="正在完成上一次移动，请稍后再试。",
                 ["ja"]="前回の移動を完了中です。少し待ってからもう一度お試しください。",
-                ["ko"]="이전 이동을 완료하는 중입니다. 잠시 후 다시 시도하세요." },
+                ["ko"]="이전 이동을 완료하는 중입니다. 잠시 후 다시 시도하세요.", ["pl"]="Kończę poprzednie przenoszenie. Spróbuj ponownie za chwilę." },
 
             ["plank"] = new Dictionary<string, string> {
                 ["en"]="This plank is stretched between two points and can't be carried.",
@@ -75,7 +75,7 @@ namespace PickUpMove
                 ["pt"]="Esta tábua está esticada entre dois pontos e não pode ser carregada.",
                 ["zh"]="这块木板横跨两点之间，无法搬动。",
                 ["ja"]="この板は2点の間に渡されているため、運べません。",
-                ["ko"]="이 널빤지는 두 지점 사이에 걸쳐 있어 옮길 수 없습니다." },
+                ["ko"]="이 널빤지는 두 지점 사이에 걸쳐 있어 옮길 수 없습니다.", ["pl"]="Ta deska jest rozciągnięta między dwoma punktami i nie można jej przenieść." },
 
             ["rope"] = new Dictionary<string, string> {
                 ["en"]="Detach the rope before moving the zipline.",
@@ -87,7 +87,7 @@ namespace PickUpMove
                 ["pt"]="Solte a corda antes de mover a tirolesa.",
                 ["zh"]="移动滑索前请先解开绳索。",
                 ["ja"]="ジップラインを動かす前にロープを外してください。",
-                ["ko"]="집라인을 옮기기 전에 밧줄을 먼저 분리하세요." },
+                ["ko"]="집라인을 옮기기 전에 밧줄을 먼저 분리하세요.", ["pl"]="Odłącz linę przed przeniesieniem tyrolki." },
 
             ["surface"] = new Dictionary<string, string> {
                 ["en"]="It only keeps its contents on the same surface type.",
@@ -99,7 +99,7 @@ namespace PickUpMove
                 ["pt"]="O conteúdo só é mantido no mesmo tipo de superfície.",
                 ["zh"]="只有放在相同类型的表面上才会保留内容物。",
                 ["ja"]="同じ種類の面に置いた場合のみ中身が保持されます。",
-                ["ko"]="같은 종류의 표면에서만 내용물이 유지됩니다." },
+                ["ko"]="같은 종류의 표면에서만 내용물이 유지됩니다.", ["pl"]="Zachowuje zawartość tylko na tym samym typie powierzchni." },
 
             ["no_host"] = new Dictionary<string, string> {
                 ["en"]="Couldn't reach the host. Left where it was.",
@@ -111,13 +111,13 @@ namespace PickUpMove
                 ["pt"]="Não foi possível contatar o anfitrião. Deixado no lugar.",
                 ["zh"]="无法连接主机，已留在原处。",
                 ["ja"]="ホストに接続できませんでした。元の場所のままです。",
-                ["ko"]="호스트에 연결할 수 없습니다. 원래 자리에 두었습니다." },
+                ["ko"]="호스트에 연결할 수 없습니다. 원래 자리에 두었습니다.", ["pl"]="Nie udało się połączyć z hostem. Pozostawiono na miejscu." },
 
             ["working"] = new Dictionary<string, string> {
                 ["en"]="Still working on it…", ["ru"]="Ещё обрабатываю…", ["de"]="Wird noch bearbeitet…",
                 ["fr"]="Traitement en cours…", ["sv"]="Arbetar fortfarande på det…",
                 ["it"]="Ci sto ancora lavorando…", ["pt"]="Ainda processando…",
-                ["zh"]="仍在处理中…", ["ja"]="処理中です…", ["ko"]="아직 처리 중입니다…" },
+                ["zh"]="仍在处理中…", ["ja"]="処理中です…", ["ko"]="아직 처리 중입니다…", ["pl"]="Wciąż przetwarzam…" },
 
             ["no_support"] = new Dictionary<string, string> {
                 ["en"]="That spot has no support. Left where it was.",
@@ -129,7 +129,7 @@ namespace PickUpMove
                 ["pt"]="Esse local não tem suporte. Deixado no lugar.",
                 ["zh"]="该位置没有支撑，已留在原处。",
                 ["ja"]="その場所には支えがありません。元の場所のままです。",
-                ["ko"]="그 자리에는 지지대가 없습니다. 원래 자리에 두었습니다." },
+                ["ko"]="그 자리에는 지지대가 없습니다. 원래 자리에 두었습니다.", ["pl"]="To miejsce nie ma podparcia. Pozostawiono na miejscu." },
 
             ["no_request"] = new Dictionary<string, string> {
                 ["en"]="The host didn't get the request. Left where it was.",
@@ -141,7 +141,7 @@ namespace PickUpMove
                 ["pt"]="O anfitrião não recebeu o pedido. Deixado no lugar.",
                 ["zh"]="主机未收到请求，已留在原处。",
                 ["ja"]="ホストがリクエストを受け取りませんでした。元の場所のままです。",
-                ["ko"]="호스트가 요청을 받지 못했습니다. 원래 자리에 두었습니다." },
+                ["ko"]="호스트가 요청을 받지 못했습니다. 원래 자리에 두었습니다.", ["pl"]="Host nie otrzymał żądania. Pozostawiono na miejscu." },
 
             ["no_answer"] = new Dictionary<string, string> {
                 ["en"]="No answer from the host. Left where it was.",
@@ -153,7 +153,7 @@ namespace PickUpMove
                 ["pt"]="Sem resposta do anfitrião. Deixado no lugar.",
                 ["zh"]="主机没有响应，已留在原处。",
                 ["ja"]="ホストから応答がありません。元の場所のままです。",
-                ["ko"]="호스트에서 응답이 없습니다. 원래 자리에 두었습니다." },
+                ["ko"]="호스트에서 응답이 없습니다. 원래 자리에 두었습니다.", ["pl"]="Brak odpowiedzi od hosta. Pozostawiono na miejscu." },
 
             ["r_not_found"] = new Dictionary<string, string> {
                 ["en"]="The host couldn't find that block.",
@@ -165,7 +165,7 @@ namespace PickUpMove
                 ["pt"]="O anfitrião não encontrou esse bloco.",
                 ["zh"]="主机找不到该建筑块。",
                 ["ja"]="ホストがそのブロックを見つけられませんでした。",
-                ["ko"]="호스트가 해당 블록을 찾지 못했습니다." },
+                ["ko"]="호스트가 해당 블록을 찾지 못했습니다.", ["pl"]="Host nie znalazł tego bloku." },
 
             ["r_no_rebuild"] = new Dictionary<string, string> {
                 ["en"]="That block can't be rebuilt on the host.",
@@ -177,7 +177,7 @@ namespace PickUpMove
                 ["pt"]="Esse bloco não pode ser recriado no anfitrião.",
                 ["zh"]="该建筑块无法在主机上重建。",
                 ["ja"]="そのブロックはホスト側で再作成できません。",
-                ["ko"]="해당 블록은 호스트에서 다시 만들 수 없습니다." },
+                ["ko"]="해당 블록은 호스트에서 다시 만들 수 없습니다.", ["pl"]="Tego bloku nie można odtworzyć na hoście." },
 
             ["r_not_ready"] = new Dictionary<string, string> {
                 ["en"]="The host isn't ready. Try again in a moment.",
@@ -189,7 +189,7 @@ namespace PickUpMove
                 ["pt"]="O anfitrião não está pronto. Tente novamente em um instante.",
                 ["zh"]="主机尚未就绪，请稍后再试。",
                 ["ja"]="ホストの準備ができていません。少し待ってからお試しください。",
-                ["ko"]="호스트가 준비되지 않았습니다. 잠시 후 다시 시도하세요." },
+                ["ko"]="호스트가 준비되지 않았습니다. 잠시 후 다시 시도하세요.", ["pl"]="Host nie jest gotowy. Spróbuj ponownie za chwilę." },
 
             ["r_no_place"] = new Dictionary<string, string> {
                 ["en"]="The host couldn't place it there.",
@@ -201,7 +201,7 @@ namespace PickUpMove
                 ["pt"]="O anfitrião não conseguiu colocá-lo ali.",
                 ["zh"]="主机无法将其放置在那里。",
                 ["ja"]="ホストがそこに設置できませんでした。",
-                ["ko"]="호스트가 거기에 설치하지 못했습니다." },
+                ["ko"]="호스트가 거기에 설치하지 못했습니다.", ["pl"]="Host nie mógł tego tam umieścić." },
 
             ["r_move_failed"] = new Dictionary<string, string> {
                 ["en"]="The move failed on the host. Left where it was.",
@@ -213,7 +213,7 @@ namespace PickUpMove
                 ["pt"]="O movimento falhou no anfitrião. Deixado no lugar.",
                 ["zh"]="在主机上移动失败，已留在原处。",
                 ["ja"]="ホスト側で移動に失敗しました。元の場所のままです。",
-                ["ko"]="호스트에서 이동에 실패했습니다. 원래 자리에 두었습니다." },
+                ["ko"]="호스트에서 이동에 실패했습니다. 원래 자리에 두었습니다.", ["pl"]="Przenoszenie nie powiodło się na hoście. Pozostawiono na miejscu." },
         };
     }
 }
