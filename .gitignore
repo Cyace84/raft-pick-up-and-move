@@ -7,3 +7,4 @@ obj/
 .DS_Store
 dist/
 recon/
+src/BuildStamp.g.cs

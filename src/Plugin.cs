@@ -166,7 +166,7 @@ namespace RaftMovableStorage
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Log?.LogWarning("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build tp13-label2) loaded. Move key = {MoveKey.Value}.");
+            Note($"{Info.Metadata.Name} {Info.Metadata.Version} (build {BuildStamp.Value}) loaded. Move key = {MoveKey.Value}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony

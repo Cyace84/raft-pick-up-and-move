@@ -42,4 +42,7 @@
     <Reference Include="Unity.InputSystem"><HintPath>$(Managed)/Unity.InputSystem.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
+  <Target Name="GenBuildStamp" BeforeTargets="BeforeBuild">
+    <Exec Command="bash gen-stamp.sh" WorkingDirectory="$(ProjectDir)" />
+  </Target>
 </Project>
