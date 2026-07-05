@@ -198,6 +198,7 @@ namespace PickUpMove
             _tickerGo = null;
             moving = null; movingItem = null; movingSlots = null;
             _hostVerifying = false; _awaitingClientChest = false;
+            _pickupScan = null; _reqScan = null; _carryDeps.Clear();
         }
 
         // Info = user-facing milestones; Trace = diagnostic non-events (missed raycast, bad spot).
@@ -242,6 +243,11 @@ namespace PickUpMove
         {
             LogRelay.Tick();
             if (Raft_Network.IsHost) { PollMoveRequests(); ProcessTeleportResends(); } else PollMoveRefusals();
+            // vanilla-style dependent scans need a settle frame between collider toggles and IsStable
+            // reads (DestroyBlock does 'yield return null' for the same reason) - step them before
+            // anything below can early-return.
+            if (_reqScan != null) StepDepScan(_reqScan);
+            if (_pickupScan != null) StepDepScan(_pickupScan);
             if (_awaitingClientChest) PollClientChest();
             if (_awaitingHostMove) PollClientMove();
             if (_tpVerifying) { PollTeleportVerify(); return; }
@@ -255,7 +261,7 @@ namespace PickUpMove
                 // corrupt them - the prior original loses its restore info (stays invisible on the client)
                 // or its removal reference (never removed => duplicate). Moves are near-instant when they
                 // work, and every pending state self-resolves on a <=10s timeout, so this never locks up.
-                else if (_awaitingClientChest || _awaitingHostMove || _hostVerifying || _tpVerifying)
+                else if (_awaitingClientChest || _awaitingHostMove || _hostVerifying || _tpVerifying || _reqScan != null)
                     NoteHud(Loc.T("busy"));
                 else TryBeginMove();
                 return;
@@ -263,18 +269,13 @@ namespace PickUpMove
 
             if (moving == null) return;
 
-            // one-frame-deferred cosmetic hide of the carried stack (see TryBeginMove note)
-            if (_hideDepsPending)
-            {
-                _hideDepsPending = false;
-                foreach (var dep in DetectCascadeTreeBlocks(moving))
-                    HideVisual(dep);
-            }
-
             // carrying: right-click cancels, left-click confirms placement at the ghost
             if (Input.GetMouseButtonDown(1)) { Trace("rmb: cancel carry."); CancelMove(); return; }
             if (Input.GetMouseButtonDown(0))
             {
+                // don't confirm while the pickup dep-scan is still settling (a 2-3 frame window):
+                // _carryDeps would be incomplete and the stack would be left behind
+                if (_pickupScan != null) { NoteHud(Loc.T("busy")); return; }
                 var bc = ComponentManager<Network_Player>.Value?.BlockCreator;
                 if (bc != null) ConfirmMove(bc);
             }
@@ -342,18 +343,20 @@ namespace PickUpMove
             // ghost on/near its own spot. NOTE: do NOT SetActive(false) the GameObject — that
             // de-registers the block and makes RemoveBlockNetwork silently fail (proven via eval:
             // it caused the duplicate). Disabling only Renderers+Colliders keeps registration intact.
+            // STACK: snapshot neighbours' stability BEFORE hiding the original (flip-test dep scan;
+            // vanilla DestroyBlock has the same shape: deactivate -> wait a frame -> read IsStable).
+            // Resolves 1-2 frames later in Tick: hides what rests on this block (cosmetic) and
+            // remembers it in _carryDeps so placement teleports the stack along.
+            _carryDeps.Clear();
+            _pickupScan = StartDepScan(block, ownB: false,
+                s => { foreach (var d in s.Deps) HideVisual(d); _carryDeps.AddRange(s.Deps); });
+
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
             _hiddenCanvases.Clear();
             foreach (var c in block.GetComponentsInChildren<Collider>())
                 if (c.enabled) { c.enabled = false; _hiddenColliders.Add(c); }
             HideVisual(block);
-
-            // VISUAL: hide anything resting on this block while carrying, so a moved table's decor
-            // doesn't float in mid-air. Deferred one frame (_hideDepsPending) because the stack predicate
-            // (IsStable with the original's colliders off) reads stale on the SAME frame we just disabled
-            // them - by the next Tick it's settled, same as at placement time. Cosmetic only.
-            _hideDepsPending = true;
 
             // make sure the build creator is active so the ghost shows, then engage it. Remember
             // whether WE enabled it: without the hammer equipped it's inactive, and its Update drives
@@ -370,6 +373,8 @@ namespace PickUpMove
         internal static void CancelMove()
         {
             if (moving == null) return;
+            if (_pickupScan != null) FinishDepScan(_pickupScan, abort: true);
+            _carryDeps.Clear();
             // restore the hidden original (BUG1)
             RestoreHidden();
             ExitBuildMode();
@@ -868,7 +873,8 @@ namespace PickUpMove
         private static readonly System.Collections.Generic.List<Block> _newDependents = new System.Collections.Generic.List<Block>();
         private static readonly System.Collections.Generic.List<Collider> _depColliderDisabled = new System.Collections.Generic.List<Collider>();
         private static int _depMovedCount;
-        private static bool _hideDepsPending;
+        // deps of the currently carried block (filled by the pickup dep-scan; teleported along at placement)
+        private static readonly System.Collections.Generic.List<Block> _carryDeps = new System.Collections.Generic.List<Block>();
         // BlockCreator was INACTIVE when the move started (no hammer in hands): we enabled it for the
         // ghost, so we must disable it again on exit. Vanilla gates the whole build UI (the 'BuildMenu'
         // prompt + RMB opening the menu, BlockCreator.Update:268-283) purely on this component being
@@ -1013,38 +1019,114 @@ namespace PickUpMove
             finally { foreach (var c in nbDisabled) if (c != null) c.enabled = true; }
         }
 
-        // Cosmetic detection of the cascade tree for hiding during carry. Disables each found piece's
-        // colliders to expose deeper ones, then RE-ENABLES all of them (placement-time detection needs
-        // colliders intact). Returns the blocks resting (directly or transitively) on `original`.
-        private static System.Collections.Generic.List<Block> DetectCascadeTreeBlocks(Block original)
+        // ---- dependent scan: what ACTUALLY rests on a block -------------------------------------
+        // HISTORY: the first teleport-era detector took every block within UnstableCheckDistance that
+        // read !IsStable() on the SAME frame it toggled colliders. IsStable is recomputed per frame,
+        // so those reads were STALE: it swept whatever was ALREADY unstable nearby (chronic wall
+        // decor, junk from earlier moves). Co-op 2026-07-05: a hammock 'carried 92 on top' and
+        // displaced half the raft. Vanilla DestroyBlock (BlockCreator.cs decompile) does it right:
+        // TempActivateCellAndNeighbours -> deactivate the block -> 'yield return null' -> only THEN
+        // read IsStable, recursing per newly-unstable block. This scan copies that frame discipline
+        // and adds a flip-test (dep must have been STABLE in the pre-toggle snapshot), so
+        // pre-existing floaters can never be swept again.
+        private sealed class DepScan
         {
-            var found = new System.Collections.Generic.List<Block>();
-            var tempOff = new System.Collections.Generic.List<Collider>();
+            public Block B;
+            public bool OwnB;          // scan disabled B's colliders itself (request path) -> restores them
+            public Vector3 Origin;
+            public int WaitUntilFrame;
+            public int? Cell;          // BlockCollisionConsolidator temp-activation handle
+            public System.Action<DepScan> Done;
+            public readonly System.Collections.Generic.List<Block> Deps = new System.Collections.Generic.List<Block>();
+            public readonly System.Collections.Generic.Dictionary<Block, bool> Before = new System.Collections.Generic.Dictionary<Block, bool>();
+            public readonly System.Collections.Generic.List<Collider> OffB = new System.Collections.Generic.List<Collider>();
+            public readonly System.Collections.Generic.List<Collider> OffDeps = new System.Collections.Generic.List<Collider>();
+        }
+        private static DepScan _pickupScan;   // local carry: hides the stack + fills _carryDeps
+        private static DepScan _reqScan;      // host handling a client request: deps for BeginTeleport
+
+        private static float UnstDist(Block b)
+        {
+            var sb = b != null && b.buildableItem != null ? b.buildableItem.settings_buildable : null;
+            return sb != null ? sb.UnstableCheckDistance : 3.5f;
+        }
+
+        // Frame 0. Call while the world is SETTLED - and, for the request path, while b's colliders
+        // are still ON (ownB: the scan toggles and restores them). Pickup path calls this right
+        // before hiding the original (ownB false - the carry owns those colliders).
+        private static DepScan StartDepScan(Block b, bool ownB, System.Action<DepScan> done)
+        {
+            var s = new DepScan { B = b, OwnB = ownB, Done = done, Origin = b.transform.position };
             try
             {
-                var frontier = new System.Collections.Generic.List<Block> { original };  // original colliders already off
-                for (int i = 0; i < frontier.Count && found.Count < 128; i++)
-                {
-                    var hb = frontier[i];
-                    float dist = hb.buildableItem?.settings_buildable != null ? hb.buildableItem.settings_buildable.UnstableCheckDistance : 3.5f;
-                    foreach (var pb in BlockCreator.GetPlacedBlocks())
-                    {
-                        if (pb == null || pb == original || frontier.Contains(pb) || found.Contains(pb)) continue;
-                        if (Vector3.Distance(pb.transform.position, hb.transform.position) > dist) continue;
-                        if (pb.IsStable()) continue;
-                        var pbi = pb.buildableItem;
-                        if (pbi?.settings_buildable == null || !pbi.settings_buildable.Placeable) continue;
-                        found.Add(pb);
-                        frontier.Add(pb);
-                        foreach (var c in pb.GetComponentsInChildren<Collider>())
-                            if (c.enabled) { c.enabled = false; tempOff.Add(c); }
-                    }
-                }
+                var cons = ComponentManager<BlockCollisionConsolidator>.Value;
+                if (cons != null) s.Cell = cons.TempActivateCellAndNeighbours(b.transform.position);
             }
             catch { }
-            finally { foreach (var c in tempOff) if (c != null) c.enabled = true; }
-            return found;
+            foreach (var pb in BlockCreator.GetPlacedBlocks())
+            {
+                if (pb == null || pb == b) continue;
+                if (Vector3.Distance(pb.transform.position, s.Origin) > 10f) continue;
+                var sb = pb.buildableItem != null ? pb.buildableItem.settings_buildable : null;
+                if (sb == null || !sb.Placeable) continue; // structure never rests on a placeable
+                try { s.Before[pb] = pb.IsStable(); } catch { }
+            }
+            if (ownB)
+                foreach (var c in b.GetComponentsInChildren<Collider>())
+                    if (c.enabled) { c.enabled = false; s.OffB.Add(c); }
+            s.WaitUntilFrame = Time.frameCount + 1;
+            return s;
         }
+
+        // Frames 1..n (from Tick): after each settle frame, a block that WAS stable and now reads
+        // !IsStable() within the frontier's UnstableCheckDistance rests on us (directly or via an
+        // earlier dep). Each wave disables the new deps' colliders and waits another frame -
+        // vanilla's recursion, flattened. A wave with no new flips ends the scan.
+        private static void StepDepScan(DepScan s)
+        {
+            if (s.B == null) { FinishDepScan(s, abort: true); return; }
+            if (Time.frameCount < s.WaitUntilFrame) return;
+            int found = 0;
+            foreach (var kv in s.Before)
+            {
+                var pb = kv.Key;
+                if (!kv.Value || pb == null || pb == s.B || s.Deps.Contains(pb)) continue;
+                if (!WithinFrontier(s, pb)) continue;
+                bool st = true; try { st = pb.IsStable(); } catch { }
+                if (st) continue;
+                s.Deps.Add(pb); found++;
+                foreach (var c in pb.GetComponentsInChildren<Collider>())
+                    if (c.enabled) { c.enabled = false; s.OffDeps.Add(c); }
+                if (s.Deps.Count >= 32)
+                {
+                    Warn($"[dep] scan found 32+ pieces near '{s.B.buildableItem?.UniqueName}' - implausible, moving it alone.");
+                    s.Deps.Clear();
+                    FinishDepScan(s, abort: false);
+                    return;
+                }
+            }
+            if (found > 0) { s.WaitUntilFrame = Time.frameCount + 1; return; } // next wave
+            FinishDepScan(s, abort: false);
+        }
+
+        private static bool WithinFrontier(DepScan s, Block pb)
+        {
+            if (s.B != null && Vector3.Distance(pb.transform.position, s.B.transform.position) <= UnstDist(s.B)) return true;
+            foreach (var d in s.Deps)
+                if (d != null && Vector3.Distance(pb.transform.position, d.transform.position) <= UnstDist(d)) return true;
+            return false;
+        }
+
+        private static void FinishDepScan(DepScan s, bool abort)
+        {
+            foreach (var c in s.OffDeps) if (c != null) c.enabled = true;
+            foreach (var c in s.OffB) if (c != null) c.enabled = true;
+            try { if (s.Cell.HasValue) ComponentManager<BlockCollisionConsolidator>.Value?.RemoveTempActivate(s.Cell.Value); } catch { }
+            if (_pickupScan == s) _pickupScan = null;
+            if (_reqScan == s) _reqScan = null;
+            if (!abort) s.Done?.Invoke(s);
+        }
+        // ------------------------------------------------------------------------------------------
 
         private static void DiscardNewDependents()
         {
@@ -1212,12 +1294,13 @@ namespace PickUpMove
                 // removed, no state to carry, no replication lifecycle to lose. Variant identity is
                 // compared by prefab NAME (instances are 'PrefabName(Clone)') - the dpsType enum on a
                 // variant prefab does NOT reliably equal the surface we send (observed: wall chest,
-                // req dps=Wall, went recreate), names are truth by construction. The carry already has
-                // the original's colliders off, so the stack detection inside BeginTeleport sees the
-                // dependents; RestoreHidden un-hides the SAME object at its new spot.
+                // req dps=Wall, went recreate), names are truth by construction. The stack found by
+                // the pickup dep-scan (_carryDeps) teleports along; RestoreHidden un-hides the SAME
+                // object at its new spot.
                 if (SameVariant(original, item, dps))
                 {
-                    BeginTeleport(original, pos, rot, default);
+                    BeginTeleport(original, pos, rot, default, _carryDeps);
+                    _carryDeps.Clear();
                     moving = null; movingItem = null; movingSlots = null;
                     RestoreHidden();
                     ExitBuildMode();
@@ -1569,25 +1652,17 @@ namespace PickUpMove
                 SendTeleport(new Steamworks.CSteamID(sid), b.ObjectIndex, b.transform.localPosition, b.transform.localEulerAngles);
         }
 
-        // HOST: teleport `b` (and everything resting on it, by the same rigid delta) to pos/rot, then
+        // HOST: teleport `b` (+ deps found by the flip-test scan, same rigid delta) to pos/rot, then
         // verify support; a spot that never settles is undone by simply putting the transforms back.
-        private static void BeginTeleport(Block b, Vector3 pos, Vector3 rot, Steamworks.CSteamID reqSender)
+        // deps may be null/empty: the block moves alone.
+        private static void BeginTeleport(Block b, Vector3 pos, Vector3 rot, Steamworks.CSteamID reqSender, List<Block> deps)
         {
             _tpBlock = b; _tpOldPos = b.transform.localPosition; _tpOldRot = b.transform.localEulerAngles;
             _tpReqSender = reqSender;
             _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
 
-            // detect the stack with b's colliders off (works both mid-carry, where they're already
-            // off, and for a client request, where we toggle them here)
-            var offs = new List<Collider>();
-            foreach (var c in b.GetComponentsInChildren<Collider>())
-                if (c.enabled) { c.enabled = false; offs.Add(c); }
-            List<Block> deps;
-            try { deps = DetectCascadeTreeBlocks(b); }
-            finally { foreach (var c in offs) c.enabled = true; }
-
             var dR = Quaternion.Euler(rot) * Quaternion.Inverse(Quaternion.Euler(_tpOldRot));
-            foreach (var d in deps)
+            if (deps != null) foreach (var d in deps)
             {
                 if (d == null) continue;
                 _tpDeps.Add(d);
@@ -1716,7 +1791,7 @@ namespace PickUpMove
             }
             catch (System.Exception ex) { Warn("move req poll: " + ex.Message); }
 
-            while (!_hostVerifying && !_tpVerifying && moving == null && _moveReqQueue.Count > 0)
+            while (!_hostVerifying && !_tpVerifying && _reqScan == null && moving == null && _moveReqQueue.Count > 0)
             {
                 var req = _moveReqQueue.Dequeue();
                 uint reqIdx = 0;
@@ -1760,7 +1835,11 @@ namespace PickUpMove
             if (SameVariant(original, item, dps))
             {
                 Note($"[t] teleport '{item.UniqueName}' #{origIndex} -> {pos.ToString("F2")}");
-                BeginTeleport(original, pos, rot, req.Sender);
+                // flip-test dep scan first (the block's colliders are ON here; the scan owns the
+                // toggle and needs settle frames) - the teleport starts when the scan lands.
+                var sender = req.Sender;
+                _reqScan = StartDepScan(original, ownB: true,
+                    s => BeginTeleport(original, pos, rot, sender, s.Deps));
                 return;
             }
             // teleport-only types must not be rebuilt (unhandled state would be lost)
