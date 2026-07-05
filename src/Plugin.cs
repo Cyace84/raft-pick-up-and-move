@@ -1297,7 +1297,13 @@ namespace PickUpMove
                 // req dps=Wall, went recreate), names are truth by construction. The stack found by
                 // the pickup dep-scan (_carryDeps) teleports along; RestoreHidden un-hides the SAME
                 // object at its new spot.
-                if (SameVariant(original, item, dps))
+                // EXCEPT PIPES: Block_Pipe is an autotile - shape + TileBitmaskManager registration +
+                // pipe-group membership are all wired at placement (OnFinishedPlacementLate: AddTile,
+                // Refresh(refreshNeighbour), OnPipePlaced) and unwound at removal. A transform-only
+                // teleport leaves the tile registered at the OLD cell, neighbours drawing a stub into
+                // the void and the pipe in the OLD fluid group (observed: fuel pipe 'looked broken',
+                // co-op 07-05 17:36). Recreate replays the full lifecycle, so pipes go that way.
+                if (SameVariant(original, item, dps) && !(original is Block_Pipe))
                 {
                     BeginTeleport(original, pos, rot, default, _carryDeps);
                     _carryDeps.Clear();
@@ -1832,7 +1838,8 @@ namespace PickUpMove
 
             // SAME PREFAB VARIANT -> teleport (see ConfirmMove): the type-7 notify doubles as the
             // success signal for the requesting client.
-            if (SameVariant(original, item, dps))
+            // pipes always recreate - a teleported autotile keeps its old bitmask/group (see ConfirmMove)
+            if (SameVariant(original, item, dps) && !(original is Block_Pipe))
             {
                 Note($"[t] teleport '{item.UniqueName}' #{origIndex} -> {pos.ToString("F2")}");
                 // flip-test dep scan first (the block's colliders are ON here; the scan owns the
