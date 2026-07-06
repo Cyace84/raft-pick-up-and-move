@@ -242,7 +242,7 @@ namespace PickUpMove
         internal static void Tick()
         {
             LogRelay.Tick();
-            if (Raft_Network.IsHost) { PollMoveRequests(); ProcessTeleportResends(); } else PollMoveRefusals();
+            if (Raft_Network.IsHost) { PollMoveRequests(); ProcessTeleportResends(); } else { PollMoveRefusals(); SendHello(); }
             // vanilla-style dependent scans need a settle frame between collider toggles and IsStable
             // reads (DestroyBlock does 'yield return null' for the same reason) - step them before
             // anything below can early-return.
@@ -267,7 +267,14 @@ namespace PickUpMove
                 return;
             }
 
-            if (moving == null) return;
+            if (moving == null) { _rearmBuild = false; return; }
+
+            // re-arm the ghost a refusal suppressed last frame (carry continues, see SuppressVanillaPlaceThisFrame)
+            if (_rearmBuild)
+            {
+                _rearmBuild = false;
+                ComponentManager<Network_Player>.Value?.BlockCreator?.SetBlockTypeToBuild(movingItem);
+            }
 
             // carrying: right-click cancels, left-click confirms placement at the ghost
             if (Input.GetMouseButtonDown(1)) { Trace("rmb: cancel carry."); CancelMove(); return; }
@@ -1256,6 +1263,26 @@ namespace PickUpMove
             if (_bcWasInactive) { _bcWasInactive = false; try { bc.gameObject.SetActive(false); } catch { } }
         }
 
+        // A placement-time refusal MUST NOT leave the vanilla ghost alive this frame. BlockCreator.
+        // Update runs after our Ticker and, seeing BuildError.None + the SAME LMB press, PLACES A
+        // REAL BLOCK itself (and eats its build cost) - that was the charger dup of 07-06 03:00:
+        // 'surface' refusal returned with a live ghost, vanilla built a new charger every click,
+        // M-cancel then restored the hidden original next to it. Success paths are safe because
+        // ExitBuildMode nulls selectedBlock in the same frame. This kills the ghost NOW and re-arms
+        // it next Tick, so the carry continues but the click can't double-place.
+        private static bool _rearmBuild;
+        private static void SuppressVanillaPlaceThisFrame(BlockCreator bc)
+        {
+            var t = Traverse.Create(bc);
+            try
+            {
+                t.Field("selectedBuildableItem").SetValue(null);
+                t.Method("DestroyGhostBlock").GetValue();
+            }
+            catch (System.Exception ex) { Warn("suppress place: " + ex.Message); }
+            _rearmBuild = true;
+        }
+
         // Read the vanilla ghost, remove the original, recreate at the new spot, restore inventory.
         internal static void ConfirmMove(BlockCreator bc)
         {
@@ -1316,7 +1343,7 @@ namespace PickUpMove
                 // a stateful type we have no adapter for must not be rebuilt (state would be lost).
                 // Those are teleport-only: same surface type keeps the same prefab -> same object.
                 if (HasUnhandledState(original))
-                { NoteHud(Loc.T("surface")); return; }
+                { NoteHud(Loc.T("surface")); SuppressVanillaPlaceThisFrame(bc); return; }
                 Block nb;
                 try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
                 catch (System.Exception ex)
@@ -1368,7 +1395,7 @@ namespace PickUpMove
                     // same teleport-only gate as the host branch, checked locally to save the round
                     // trip (the host enforces it authoritatively anyway via refusal relay)
                     if (!SameVariant(original, item, dps) && HasUnhandledState(original))
-                    { NoteHud(Loc.T("surface")); return; }
+                    { NoteHud(Loc.T("surface")); SuppressVanillaPlaceThisFrame(bc); return; }
                     if (player.Network == null) { Warn("client move: no Network."); AbortKeepOriginal(); return; }
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
                     { NoteHud(Loc.T("no_host")); AbortKeepOriginal(); return; }
@@ -1740,6 +1767,32 @@ namespace PickUpMove
         // move at a time - each kicks off the place-first verify pipeline. A request that arrives while
         // we're mid-move is QUEUED, not dropped (dropping was the cause of the "client move lagged /
         // didn't land" when moving blocks in quick succession).
+        // PRESENCE BEACON: the host learns peer Steam ids ONLY from packets the mod sends (vanilla
+        // addressing is PlayFab - the tp4 lesson). A quiet client (no move requests; and RelayLogs
+        // defaults OFF now, so no relay batches either) was never in _knownPeers and MISSED every
+        // host-initiated teleport (observed 07-06 05:24: host moved a chest, client kept seeing it
+        // under the stairs next to the newly crafted one). A 9-byte hello every 10s fixes the roster;
+        // PollMoveRequests RegisterPeer()s the sender of ANY packet, so kind 8 needs no handler.
+        private static float _nextHello;
+        private static void SendHello()
+        {
+            if (Time.realtimeSinceStartup < _nextHello) return;
+            _nextHello = Time.realtimeSinceStartup + 10f;
+            try
+            {
+                var net = ComponentManager<Raft_Network>.Value;
+                var host = net != null ? net.CurrentSteamHost : default;
+                if (!host.IsValid()) return;
+                using var ms = new MemoryStream();
+                using var w = new BinaryWriter(ms);
+                w.Write(MoveMagic); w.Write((byte)8); w.Write(0u); // kind 8 = hello
+                var data = ms.ToArray();
+                Steamworks.SteamNetworking.SendP2PPacket(host, data, (uint)data.Length,
+                    Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
+            }
+            catch { }
+        }
+
         private static void PollMoveRequests()
         {
             try
