@@ -1324,13 +1324,11 @@ namespace PickUpMove
                 // req dps=Wall, went recreate), names are truth by construction. The stack found by
                 // the pickup dep-scan (_carryDeps) teleports along; RestoreHidden un-hides the SAME
                 // object at its new spot.
-                // EXCEPT PIPES: Block_Pipe is an autotile - shape + TileBitmaskManager registration +
-                // pipe-group membership are all wired at placement (OnFinishedPlacementLate: AddTile,
-                // Refresh(refreshNeighbour), OnPipePlaced) and unwound at removal. A transform-only
-                // teleport leaves the tile registered at the OLD cell, neighbours drawing a stub into
-                // the void and the pipe in the OLD fluid group (observed: fuel pipe 'looked broken',
-                // co-op 07-05 17:36). Recreate replays the full lifecycle, so pipes go that way.
-                if (SameVariant(original, item, dps) && !(original is Block_Pipe))
+                // Block_Pipe (segments AND devices - the charger IS Block_Pipe) teleports too:
+                // BeginTeleport replays the autotile lifecycle around the move (see PipeLifecycle).
+                // The old blanket 'pipes always recreate' exclusion locked the charger out entirely
+                // (stateful -> recreate refused -> 'surface' forever, 07-07).
+                if (SameVariant(original, item, dps))
                 {
                     BeginTeleport(original, pos, rot, default, _carryDeps);
                     _carryDeps.Clear();
@@ -1520,8 +1518,10 @@ namespace PickUpMove
                             var tb = BlockCreator.GetBlockByObjectIndex(origIndex);
                             if (tb != null)
                             {
+                                PipeLifecycle(tb, place: false); // client-side: refreshes tiles only (group ops are host-gated)
                                 tb.transform.localPosition = tpPos;
                                 tb.transform.localEulerAngles = tpRot;
+                                PipeLifecycle(tb, place: true);
                             }
                             if (mine) // our pending move completed as a teleport - un-hide the SAME object at its new spot
                             {
@@ -1621,7 +1621,7 @@ namespace PickUpMove
         {
             try
             {
-                if (original == null) return false;
+                if (original == null) { Warn("SameVariant: original is null/destroyed -> false"); return false; }
                 var reqPrefab = item?.settings_buildable?.GetBlockPrefab(dps);
                 // reqPrefab == null => the item has NO distinct prefab for this dps, i.e. it is a
                 // SINGLE-VARIANT placeable (BatteryCharger, most devices: one floor prefab, dpsType
@@ -1637,7 +1637,10 @@ namespace PickUpMove
                 if (!same) Note($"[t] variant differs: orig='{origBase}' req='{reqPrefab.name}' (dps={dps}, origDps={original.dpsType}) -> recreate path");
                 return same;
             }
-            catch { return false; }
+            // a silent 'catch -> false' here ATE the evidence of the 07-07 charger refusal (live
+            // eval proved every legit input returns true; only a swallowed throw could refuse) -
+            // never mute this catch again
+            catch (System.Exception ex) { Warn($"SameVariant threw for '{original?.name}' dps={dps}: {ex}"); return false; }
         }
 
         private static byte[] BuildTeleportPayload(uint idx, Vector3 pos, Vector3 rot)
@@ -1697,6 +1700,46 @@ namespace PickUpMove
         // HOST: teleport `b` (+ deps found by the flip-test scan, same rigid delta) to pos/rot, then
         // verify support; a spot that never settles is undone by simply putting the transforms back.
         // deps may be null/empty: the block moves alone.
+        // Block_Pipe covers pipe SEGMENTS and pipe-network DEVICES - Placeable_BatteryCharger's
+        // block component IS Block_Pipe (eval-proven 07-07, the 'charger can never move' regression
+        // of the 00d30a0 blanket pipe exclusion). Such a block wires itself into the world at
+        // placement (OnFinishedPlacementLate: TileBitmaskManager.AddTile + Refresh(neighbours) +
+        // OnPipePlaced -> fluid-group merge) and unwinds at removal (OnDestroy: OnPipeRemoved +
+        // RemoveTile + RefreshNeighbours). A bare transform teleport left the tile registered at the
+        // OLD cell and the pipe in the OLD group. Replaying those exact calls around the move makes
+        // teleport VALID for pipes again: same object, state (charger batteries/fuel) intact.
+        // Vanilla gating mirrored: tiles on ALL sides, OnPipePlaced/Removed host-only. The
+        // OnMeshChange/OnCompleteVisual handlers stay subscribed - the BitmaskTile instance is never
+        // destroyed - so no double-wiring. OnPipePlaced re-reads transform.position, so call it AFTER
+        // the transform is set (and OnPipeRemoved BEFORE, while snappedBuildingPosition still matches).
+        private static void PipeLifecycle(Block b, bool place)
+        {
+            var bp = b as Block_Pipe;
+            if (bp == null) return;
+            try
+            {
+                var cons = Traverse.Create(bp).Field("pipeBitmaskConnections").GetValue<Block_PipeBitmask[]>();
+                if (cons == null) return;
+                foreach (var con in cons)
+                {
+                    if (con == null) continue;
+                    if (!place)
+                    {
+                        if (Raft_Network.IsHost && con.pipe != null) con.pipe.OnPipeRemoved();
+                        if (con.bitmaskTile != null)
+                        { TileBitmaskManager.RemoveTile(con.bitmaskTile); con.bitmaskTile.RefreshNeighbours(); }
+                    }
+                    else
+                    {
+                        if (con.bitmaskTile != null)
+                        { TileBitmaskManager.AddTile(con.bitmaskTile); con.bitmaskTile.Refresh(refreshNeighbour: true); }
+                        if (Raft_Network.IsHost && con.pipe != null) con.pipe.OnPipePlaced();
+                    }
+                }
+            }
+            catch (System.Exception ex) { Warn($"pipe lifecycle ({(place ? "place" : "remove")}) '{b.name}': {ex.Message}"); }
+        }
+
         private static void BeginTeleport(Block b, Vector3 pos, Vector3 rot, Steamworks.CSteamID reqSender, List<Block> deps)
         {
             _tpBlock = b; _tpOldPos = b.transform.localPosition; _tpOldRot = b.transform.localEulerAngles;
@@ -1704,17 +1747,21 @@ namespace PickUpMove
             _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
 
             var dR = Quaternion.Euler(rot) * Quaternion.Inverse(Quaternion.Euler(_tpOldRot));
+            PipeLifecycle(b, place: false);
             if (deps != null) foreach (var d in deps)
             {
                 if (d == null) continue;
                 _tpDeps.Add(d);
                 _tpDepsOldPos.Add(d.transform.localPosition);
                 _tpDepsOldRot.Add(d.transform.localRotation);
+                PipeLifecycle(d, place: false);
                 d.transform.localPosition = pos + dR * (d.transform.localPosition - _tpOldPos);
                 d.transform.localRotation = dR * d.transform.localRotation;
+                PipeLifecycle(d, place: true);
             }
             b.transform.localPosition = pos;
             b.transform.localEulerAngles = rot;
+            PipeLifecycle(b, place: true);
             Physics.SyncTransforms();
             _tpVerifyStart = Time.frameCount;
             _tpVerifyDeadlineTime = Time.realtimeSinceStartup + 6f;
@@ -1741,9 +1788,16 @@ namespace PickUpMove
             {
                 LogStability(_tpBlock);
                 for (int i = 0; i < _tpDeps.Count; i++)
-                    if (_tpDeps[i] != null) { _tpDeps[i].transform.localPosition = _tpDepsOldPos[i]; _tpDeps[i].transform.localRotation = _tpDepsOldRot[i]; }
+                    if (_tpDeps[i] != null)
+                    {
+                        PipeLifecycle(_tpDeps[i], place: false);
+                        _tpDeps[i].transform.localPosition = _tpDepsOldPos[i]; _tpDeps[i].transform.localRotation = _tpDepsOldRot[i];
+                        PipeLifecycle(_tpDeps[i], place: true);
+                    }
+                PipeLifecycle(_tpBlock, place: false);
                 _tpBlock.transform.localPosition = _tpOldPos;
                 _tpBlock.transform.localEulerAngles = _tpOldRot;
+                PipeLifecycle(_tpBlock, place: true);
                 Physics.SyncTransforms();
                 NoteHud(Loc.T("no_support"));
                 if (_tpReqSender.IsValid()) SendMoveRefusal(_tpReqSender, _tpBlock.ObjectIndex, "no_support");
@@ -1899,9 +1953,9 @@ namespace PickUpMove
             if (bc == null) { SendMoveRefusal(req.Sender, origIndex, "r_not_ready"); return; }
 
             // SAME PREFAB VARIANT -> teleport (see ConfirmMove): the type-7 notify doubles as the
-            // success signal for the requesting client.
-            // pipes always recreate - a teleported autotile keeps its old bitmask/group (see ConfirmMove)
-            if (SameVariant(original, item, dps) && !(original is Block_Pipe))
+            // success signal for the requesting client. Block_Pipe included - BeginTeleport replays
+            // the autotile lifecycle around the move (see PipeLifecycle).
+            if (SameVariant(original, item, dps))
             {
                 Note($"[t] teleport '{item.UniqueName}' #{origIndex} -> {pos.ToString("F2")}");
                 // flip-test dep scan first (the block's colliders are ON here; the scan owns the
