@@ -1621,8 +1621,17 @@ namespace PickUpMove
         {
             try
             {
+                if (original == null) return false;
                 var reqPrefab = item?.settings_buildable?.GetBlockPrefab(dps);
-                if (reqPrefab == null || original == null) return false;
+                // reqPrefab == null => the item has NO distinct prefab for this dps, i.e. it is a
+                // SINGLE-VARIANT placeable (BatteryCharger, most devices: one floor prefab, dpsType
+                // Default/None). GetBlockPrefab is keyed on surface enums it doesn't register, so the
+                // round-trip GetBlockPrefab(ghost.dpsType) returns null. There is no OTHER variant to
+                // recreate into -> it is the same variant by definition -> teleport. The old code fell
+                // to 'return false' here with NO log, so HasUnhandledState refused every charger move
+                // with 'surface' forever (observed 07-06 02:54-03:05: charger refused ~10x, never a
+                // 'variant differs' line - proof the null branch, not a name mismatch, was taken).
+                if (reqPrefab == null) { Note($"[t] '{original.name}' has no variant prefab for dps={dps} -> single-variant, teleport"); return true; }
                 string origBase = original.name.Replace("(Clone)", "").Trim();
                 bool same = origBase == reqPrefab.name;
                 if (!same) Note($"[t] variant differs: orig='{origBase}' req='{reqPrefab.name}' (dps={dps}, origDps={original.dpsType}) -> recreate path");
