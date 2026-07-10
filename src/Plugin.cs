@@ -350,7 +350,7 @@ namespace PickUpMove
             // visual-only clone of the LIVE original (inserted batteries, pot contents...) shown on
             // the ghost. MUST be built before HideVisual disables the renderers we copy from.
             DestroyGhostPreviews();
-            AddGhostPreview(block, block);
+            AddGhostPreview(block, block, pruneAgainstGhost: true);
 
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
@@ -1250,11 +1250,11 @@ namespace PickUpMove
         // exist on them; they are never registered with BlockCreator/save/network and are destroyed
         // in ExitBuildMode (every carry-end path funnels there). Worst possible failure = stray
         // visuals, never a duplicate.
-        private sealed class GhostPreview { public GameObject Go; public Vector3 LPos; public Quaternion LRot; }
+        private sealed class GhostPreview { public GameObject Go; public Vector3 LPos; public Quaternion LRot; public bool PruneAgainstGhost; }
         private static readonly System.Collections.Generic.List<GhostPreview> _ghostPreviews = new System.Collections.Generic.List<GhostPreview>();
         private static Material _previewMat; // last ghost material applied (green/red sync)
 
-        private static void AddGhostPreview(Block src, Block anchor)
+        private static void AddGhostPreview(Block src, Block anchor, bool pruneAgainstGhost = false)
         {
             if (src == null || anchor == null) return;
             try
@@ -1283,6 +1283,7 @@ namespace PickUpMove
                     Go = root,
                     LPos = anchor.transform.InverseTransformPoint(src.transform.position),
                     LRot = Quaternion.Inverse(anchor.transform.rotation) * src.transform.rotation,
+                    PruneAgainstGhost = pruneAgainstGhost,
                 });
                 root.SetActive(false); // shown by UpdateGhostPreviews once the ghost is live
             }
@@ -1296,16 +1297,46 @@ namespace PickUpMove
             if (moving != null)
                 try { ghost = ComponentManager<Network_Player>.Value?.BlockCreator?.selectedBlock; } catch { }
             bool show = ghost != null && ghost.gameObject.activeInHierarchy;
+            // Tint with the EXACT vanilla ghost materials (GameManager assets), red when the ghost
+            // is red. Reading an arbitrary ghost renderer picked up unmanaged materials -> the
+            // 'rotten textures' look of the first attempt.
             Material mat = null;
             if (show)
             {
-                try { var gr = ghost.GetComponentInChildren<Renderer>(); mat = gr != null ? gr.sharedMaterial : null; } catch { }
+                try
+                {
+                    var gm = SingletonGeneric<GameManager>.Singleton;
+                    if (gm != null)
+                    {
+                        mat = gm.ghostMaterialGreen;
+                        foreach (var gr in ghost.GetComponentsInChildren<Renderer>())
+                            if (gr != null && gr.sharedMaterial == gm.ghostMaterialRed) { mat = gm.ghostMaterialRed; break; }
+                    }
+                }
+                catch { }
             }
             bool remat = mat != null && mat != _previewMat;
             if (remat) _previewMat = mat;
             foreach (var p in _ghostPreviews)
             {
                 if (p.Go == null) continue;
+                if (show && p.PruneAgainstGhost)
+                {
+                    // Drop clone meshes the vanilla ghost already renders (same prefab meshes at the
+                    // same pose = z-fighting flicker). What survives is exactly the LIVE extras the
+                    // prefab ghost lacks: batteries, pot contents, planted crops... One-shot.
+                    p.PruneAgainstGhost = false;
+                    try
+                    {
+                        var ghostMeshes = new System.Collections.Generic.HashSet<Mesh>();
+                        foreach (var gmf in ghost.GetComponentsInChildren<MeshFilter>(true))
+                            if (gmf.sharedMesh != null) ghostMeshes.Add(gmf.sharedMesh);
+                        foreach (var cmf in p.Go.GetComponentsInChildren<MeshFilter>())
+                            if (cmf.sharedMesh != null && ghostMeshes.Contains(cmf.sharedMesh))
+                                UnityEngine.Object.Destroy(cmf.gameObject);
+                    }
+                    catch { }
+                }
                 if (p.Go.activeSelf != show) p.Go.SetActive(show);
                 if (!show) continue;
                 p.Go.transform.SetPositionAndRotation(
