@@ -1328,9 +1328,17 @@ namespace PickUpMove
                     p.PruneAgainstGhost = false;
                     try
                     {
+                        // ONLY meshes the ghost actually RENDERS: the prefab also contains the
+                        // inactive content models (battery, purifier water, cooked food) that the
+                        // live original has ACTIVE - includeInactive=true pruned exactly the extras
+                        // this preview exists for (batteries/water invisible, first test).
                         var ghostMeshes = new System.Collections.Generic.HashSet<Mesh>();
-                        foreach (var gmf in ghost.GetComponentsInChildren<MeshFilter>(true))
-                            if (gmf.sharedMesh != null) ghostMeshes.Add(gmf.sharedMesh);
+                        foreach (var gmf in ghost.GetComponentsInChildren<MeshFilter>())
+                        {
+                            if (gmf.sharedMesh == null || !gmf.gameObject.activeInHierarchy) continue;
+                            var gr2 = gmf.GetComponent<MeshRenderer>();
+                            if (gr2 != null && gr2.enabled) ghostMeshes.Add(gmf.sharedMesh);
+                        }
                         foreach (var cmf in p.Go.GetComponentsInChildren<MeshFilter>())
                             if (cmf.sharedMesh != null && ghostMeshes.Contains(cmf.sharedMesh))
                                 UnityEngine.Object.Destroy(cmf.gameObject);
