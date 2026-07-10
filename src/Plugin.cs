@@ -36,7 +36,7 @@ namespace PickUpMove
     //
     // SCOPE: single-player + multiplayer (host AND client), all live-verified. Host places via
     // CreateBlockCheat; a client SendP2P's a vanilla place-request to the host and polls the
-    // replicated chest to sync contents (see ConfirmMove / PollClientChest). Contents travel via
+    // replicated chest to sync contents (see ConfirmMove / PollClientMove). Contents travel via
     // the vanilla Message_Storage_Close path. Only the player moving a chest needs the mod.
 
     [BepInPlugin(Guid, "Pick Up & Move", "1.0.0")]
@@ -80,10 +80,6 @@ namespace PickUpMove
         private static readonly List<Renderer> _hiddenRenderers = new List<Renderer>();
         private static readonly List<Canvas> _hiddenCanvases = new List<Canvas>();   // device screens (Reciever radar) aren't Renderers
 
-        // CLIENT (non-host) placement is async: we ask the host to place the chest, then must wait
-        // for the host's reply to spawn it locally before we can push its contents. State for that.
-        private static bool _awaitingClientChest;
-        private static RGD_Slot[] _syncSlots;
 
         // CLIENT-MOVES-ANYTHING (path a): a non-host mover can't authoritatively create/restore a
         // device, so it asks the HOST (who also runs the mod) to do the whole move. We use a private
@@ -110,13 +106,7 @@ namespace PickUpMove
         private static bool _cmSeenLogged;
         private static Steamworks.CSteamID _hostReqSender; // valid = current verify is a client request
         private static float _hostReqRecvTime;
-        private static Vector3 _syncPos;
-        private static Paint _syncPaint;
-        private static int _syncDeadlineFrame;
         private static readonly HashSet<uint> _preExisting = new HashSet<uint>();
-        // the original kept ALIVE (only hidden) on the client until the replicated chest is confirmed
-        // STABLE; removed only then, restored on failure/timeout -> never lost (DATA-LOSS FIX)
-        private static Storage_Small _pendingClientOriginal;
         // HOST place-first verify: nb is created but the original is removed ONLY once nb settles to
         // IsStable() over a few physics steps (the same-frame check reads stale - see DIAG). The
         // original stays hidden until then, so a never-settling spot is undone with nothing lost.
@@ -197,7 +187,7 @@ namespace PickUpMove
             catch { }
             _tickerGo = null;
             moving = null; movingItem = null; movingSlots = null;
-            _hostVerifying = false; _awaitingClientChest = false;
+            _hostVerifying = false;
             _pickupScan = null; _reqScan = null; _carryDeps.Clear();
         }
 
@@ -248,7 +238,6 @@ namespace PickUpMove
             // anything below can early-return.
             if (_reqScan != null) StepDepScan(_reqScan);
             if (_pickupScan != null) StepDepScan(_pickupScan);
-            if (_awaitingClientChest) PollClientChest();
             if (_awaitingHostMove) PollClientMove();
             if (_tpVerifying) { PollTeleportVerify(); return; }
             if (_hostVerifying) { PollHostVerify(); return; }
@@ -261,7 +250,7 @@ namespace PickUpMove
                 // corrupt them - the prior original loses its restore info (stays invisible on the client)
                 // or its removal reference (never removed => duplicate). Moves are near-instant when they
                 // work, and every pending state self-resolves on a <=10s timeout, so this never locks up.
-                else if (_awaitingClientChest || _awaitingHostMove || _hostVerifying || _tpVerifying || _reqScan != null)
+                else if (_awaitingHostMove || _hostVerifying || _tpVerifying || _reqScan != null)
                     NoteHud(Loc.T("busy"));
                 else TryBeginMove();
                 return;
@@ -479,7 +468,7 @@ namespace PickUpMove
                 _hudNote = null;
                 try { if (_hudLabel != null) _hudLabel.gameObject.SetActive(false); } catch { }
             }
-            if (moving != null || _hostVerifying || _awaitingClientChest) { ClearHintIfShown(); return; }
+            if (moving != null || _hostVerifying) { ClearHintIfShown(); return; }
             UpdateMoveHint();
         }
         private static void UpdateMoveHint()
@@ -1589,7 +1578,6 @@ namespace PickUpMove
         // CLIENT: host acknowledged our pending move request (it WILL answer with success or refusal,
         // so the blind timeout no longer applies); probe = zombie check after a lost verdict.
         private static bool _cmAcked, _cmProbeSent;
-        private static int _cmProbeDeadline;
 
         // ---- TELEPORT MOVE (same-surface) ----------------------------------------------------
         // Move the EXISTING block by setting its transform - nothing is removed or recreated, so no
@@ -2189,67 +2177,6 @@ namespace PickUpMove
             }
         }
 
-        private static void PollClientChest()
-        {
-            if (Time.frameCount > _syncDeadlineFrame)
-            {
-                // host never spawned the chest -> un-hide the original we kept; nothing lost
-                RestoreHidden();
-                _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null;
-                Warn("client sync: host didn't place the chest in time; original restored, nothing lost.");
-                return;
-            }
-            if (StorageManager.allStorages == null) return;
-
-            Storage_Small best = null;
-            float bestSqr = 1f; // within ~1 unit of where we placed the ghost
-            foreach (var s in StorageManager.allStorages)
-            {
-                if (s == null || _preExisting.Contains(s.ObjectIndex)) continue;
-                float d = (s.transform.localPosition - _syncPos).sqrMagnitude;
-                if (d < bestSqr) { bestSqr = d; best = s; }
-            }
-            if (best == null) return; // host's reply hasn't spawned it yet
-            if (!_cmSeenLogged) { Note($"[t] chest first seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request"); _cmSeenLogged = true; }
-
-            var player = ComponentManager<Network_Player>.Value;
-            if (player?.Network == null) { RestoreHidden(); _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null; return; }
-
-            if (!best.IsStable())
-            {
-                // unsupported spot: the chest would be cascaded when we remove the original, so
-                // discard it and keep the original instead. Nothing lost.
-                try { BlockCreator.RemoveBlockNetwork(best, null, true); } catch { }
-                RestoreHidden();
-                _awaitingClientChest = false; _syncSlots = null; _pendingClientOriginal = null;
-                NoteHud(Loc.T("no_support"));
-                return;
-            }
-
-            if (_syncSlots != null) best.GetInventoryReference()?.SetSlotsFromRGD(_syncSlots); // our local view
-            ApplyPaint(best, _syncPaint, player);
-            try
-            {
-                if (player.StorageManager != null)
-                {
-                    var msg = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, best);
-                    player.SendP2P(msg, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
-                }
-                Note($"client sync: pushed {_syncSlots?.Length ?? 0} slots for chest #{best.ObjectIndex}.");
-            }
-            catch (System.Exception ex) { Warn("client sync RPC failed: " + ex.Message); }
-
-            // stable + filled -> NOW it is safe to delete the original we kept hidden
-            _hiddenColliders.Clear();
-            _hiddenRenderers.Clear();
-            _hiddenCanvases.Clear();
-            if (_pendingClientOriginal != null)
-            {
-                try { BlockCreator.RemoveBlockNetwork(_pendingClientOriginal, null, true); } catch { }
-                _pendingClientOriginal = null;
-            }
-            _awaitingClientChest = false; _syncSlots = null;
-        }
     }
 
     // Draws a "<key> Move" hint under the vanilla "Open" prompt whenever the player aims at a closed
