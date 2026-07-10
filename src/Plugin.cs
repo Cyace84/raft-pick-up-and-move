@@ -182,7 +182,7 @@ namespace PickUpMove
             try
             {
                 foreach (var go in Resources.FindObjectsOfTypeAll<GameObject>())
-                    if (go != null && (go.name == "RMS_Ticker" || go.name == "PickUpMove_Note")) UnityEngine.Object.Destroy(go);
+                    if (go != null && (go.name == "RMS_Ticker" || go.name == "PickUpMove_Note" || go.name == "PUM_GhostPreview")) UnityEngine.Object.Destroy(go);
             }
             catch { }
             _tickerGo = null;
@@ -345,7 +345,12 @@ namespace PickUpMove
             // remembers it in _carryDeps so placement teleports the stack along.
             _carryDeps.Clear();
             _pickupScan = StartDepScan(block, ownB: false,
-                s => { foreach (var d in s.Deps) HideVisual(d); _carryDeps.AddRange(s.Deps); });
+                s => { foreach (var d in s.Deps) { AddGhostPreview(d, block); HideVisual(d); } _carryDeps.AddRange(s.Deps); });
+
+            // visual-only clone of the LIVE original (inserted batteries, pot contents...) shown on
+            // the ghost. MUST be built before HideVisual disables the renderers we copy from.
+            DestroyGhostPreviews();
+            AddGhostPreview(block, block);
 
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
@@ -444,6 +449,9 @@ namespace PickUpMove
         // (clearAllTexts) wipe ours, or ours wipe theirs. LateUpdate guarantees we stack last.
         internal static void LateTick()
         {
+            // ghost previews FIRST: the hud-note branch below early-returns while a note is shown,
+            // and the previews must keep following the ghost through refusal notes mid-carry.
+            UpdateGhostPreviews();
             // transient user-feedback line first: it must show even mid-carry (refusals fire then)
             if (_hudNote != null)
             {
@@ -1233,8 +1241,96 @@ namespace PickUpMove
         // its Update both drives the build-menu prompt and resets isRotating. Deactivating it froze
         // isRotating=true, and Hotbar gates number-key slot selection on BlockCreator.IsRotating, so the
         // hotbar got stuck on one slot until an inventory action (observed: Hotbar.Update line 366).
+        // ---- GHOST PREVIEW --------------------------------------------------------------------
+        // Cosmetic only: the vanilla ghost is the bare PREFAB (empty table, empty charger), so the
+        // carried stack (items on top = _carryDeps) and live contents (batteries, pot food = active
+        // child models of the original) are invisible while carrying. These previews are pure
+        // visual clones built from scratch — an empty GameObject plus copied meshes/materials and
+        // NOTHING else. No Instantiate, so no MonoBehaviour/Collider/network component can ever
+        // exist on them; they are never registered with BlockCreator/save/network and are destroyed
+        // in ExitBuildMode (every carry-end path funnels there). Worst possible failure = stray
+        // visuals, never a duplicate.
+        private sealed class GhostPreview { public GameObject Go; public Vector3 LPos; public Quaternion LRot; }
+        private static readonly System.Collections.Generic.List<GhostPreview> _ghostPreviews = new System.Collections.Generic.List<GhostPreview>();
+        private static Material _previewMat; // last ghost material applied (green/red sync)
+
+        private static void AddGhostPreview(Block src, Block anchor)
+        {
+            if (src == null || anchor == null) return;
+            try
+            {
+                var root = new GameObject("PUM_GhostPreview");
+                root.transform.SetPositionAndRotation(src.transform.position, src.transform.rotation);
+                int n = 0;
+                foreach (var mf in src.GetComponentsInChildren<MeshFilter>())
+                {
+                    if (mf == null || mf.sharedMesh == null || !mf.gameObject.activeInHierarchy) continue;
+                    var mr = mf.GetComponent<MeshRenderer>();
+                    if (mr == null || !mr.enabled) continue;
+                    var child = new GameObject("m");
+                    child.transform.SetPositionAndRotation(mf.transform.position, mf.transform.rotation);
+                    child.transform.localScale = mf.transform.lossyScale; // root scale is 1
+                    child.transform.SetParent(root.transform, true);
+                    child.AddComponent<MeshFilter>().sharedMesh = mf.sharedMesh;
+                    var r = child.AddComponent<MeshRenderer>();
+                    r.sharedMaterials = mr.sharedMaterials;
+                    r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    n++;
+                }
+                if (n == 0) { UnityEngine.Object.Destroy(root); return; }
+                _ghostPreviews.Add(new GhostPreview
+                {
+                    Go = root,
+                    LPos = anchor.transform.InverseTransformPoint(src.transform.position),
+                    LRot = Quaternion.Inverse(anchor.transform.rotation) * src.transform.rotation,
+                });
+                root.SetActive(false); // shown by UpdateGhostPreviews once the ghost is live
+            }
+            catch (System.Exception ex) { Warn("ghost preview build: " + ex.Message); }
+        }
+
+        private static void UpdateGhostPreviews()
+        {
+            if (_ghostPreviews.Count == 0) return;
+            Block ghost = null;
+            if (moving != null)
+                try { ghost = ComponentManager<Network_Player>.Value?.BlockCreator?.selectedBlock; } catch { }
+            bool show = ghost != null && ghost.gameObject.activeInHierarchy;
+            Material mat = null;
+            if (show)
+            {
+                try { var gr = ghost.GetComponentInChildren<Renderer>(); mat = gr != null ? gr.sharedMaterial : null; } catch { }
+            }
+            bool remat = mat != null && mat != _previewMat;
+            if (remat) _previewMat = mat;
+            foreach (var p in _ghostPreviews)
+            {
+                if (p.Go == null) continue;
+                if (p.Go.activeSelf != show) p.Go.SetActive(show);
+                if (!show) continue;
+                p.Go.transform.SetPositionAndRotation(
+                    ghost.transform.TransformPoint(p.LPos), ghost.transform.rotation * p.LRot);
+                if (remat)
+                    foreach (var r in p.Go.GetComponentsInChildren<Renderer>())
+                    {
+                        var mats = r.sharedMaterials;
+                        for (int i = 0; i < mats.Length; i++) mats[i] = mat;
+                        r.sharedMaterials = mats;
+                    }
+            }
+        }
+
+        private static void DestroyGhostPreviews()
+        {
+            foreach (var p in _ghostPreviews)
+                if (p.Go != null) try { UnityEngine.Object.Destroy(p.Go); } catch { }
+            _ghostPreviews.Clear();
+            _previewMat = null;
+        }
+
         private static void ExitBuildMode()
         {
+            DestroyGhostPreviews();
             var bc = ComponentManager<Network_Player>.Value?.BlockCreator;
             if (bc == null) return;
             var t = Traverse.Create(bc);
