@@ -1261,12 +1261,24 @@ namespace PickUpMove
             {
                 var root = new GameObject("PUM_GhostPreview");
                 root.transform.SetPositionAndRotation(src.transform.position, src.transform.rotation);
+                // LODGroup keeps ALL levels' renderers enabled (culling is the group's job); cloning
+                // every level stacked LOD0+LOD1+LOD2 on itself = the 'black flicker' z-fight. Clone
+                // LOD0 only: skip renderers that appear in levels >=1 but not in level 0.
+                var lodSkip = new System.Collections.Generic.HashSet<Renderer>();
+                foreach (var lg in src.GetComponentsInChildren<LODGroup>())
+                {
+                    var lods = lg.GetLODs();
+                    for (int i = 1; i < lods.Length; i++)
+                        foreach (var lr in lods[i].renderers) if (lr != null) lodSkip.Add(lr);
+                    if (lods.Length > 0)
+                        foreach (var lr in lods[0].renderers) if (lr != null) lodSkip.Remove(lr);
+                }
                 int n = 0;
                 foreach (var mf in src.GetComponentsInChildren<MeshFilter>())
                 {
                     if (mf == null || mf.sharedMesh == null || !mf.gameObject.activeInHierarchy) continue;
                     var mr = mf.GetComponent<MeshRenderer>();
-                    if (mr == null || !mr.enabled) continue;
+                    if (mr == null || !mr.enabled || lodSkip.Contains(mr)) continue;
                     var child = new GameObject("m");
                     child.transform.SetPositionAndRotation(mf.transform.position, mf.transform.rotation);
                     child.transform.localScale = mf.transform.lossyScale; // root scale is 1
@@ -1297,20 +1309,38 @@ namespace PickUpMove
             if (moving != null)
                 try { ghost = ComponentManager<Network_Player>.Value?.BlockCreator?.selectedBlock; } catch { }
             bool show = ghost != null && ghost.gameObject.activeInHierarchy;
-            // Tint with the EXACT vanilla ghost materials (GameManager assets), red when the ghost
-            // is red. Reading an arbitrary ghost renderer picked up unmanaged materials -> the
-            // 'rotten textures' look of the first attempt.
+            // Red/green state of the ghost. Vanilla's MaterialRendConnection.SetMaterial (decompile)
+            // has TWO modes: paint-shader surfaces get a per-renderer MaterialPropertyBlock
+            // '_BuildingEmission' = shaderGreen/shaderRed (material asset UNCHANGED - why the old
+            // sharedMaterial==ghostMaterialRed check never saw red), everything else gets the ghost
+            // material swapped in. Detect via both channels.
             Material mat = null;
+            GameManager gmr = null;
             if (show)
             {
                 try
                 {
-                    var gm = SingletonGeneric<GameManager>.Singleton;
-                    if (gm != null)
+                    gmr = SingletonGeneric<GameManager>.Singleton;
+                    if (gmr != null)
                     {
-                        mat = gm.ghostMaterialGreen;
+                        mat = gmr.ghostMaterialGreen;
+                        var mpb = new MaterialPropertyBlock();
                         foreach (var gr in ghost.GetComponentsInChildren<Renderer>())
-                            if (gr != null && gr.sharedMaterial == gm.ghostMaterialRed) { mat = gm.ghostMaterialRed; break; }
+                        {
+                            if (gr == null) continue;
+                            var shared = gr.sharedMaterials;
+                            for (int i = 0; i < shared.Length; i++)
+                            {
+                                if (shared[i] == null) continue;
+                                if (shared[i] == gmr.ghostMaterialRed) { mat = gmr.ghostMaterialRed; break; }
+                                if (shared[i].shader == gmr.blockPaintShader)
+                                {
+                                    gr.GetPropertyBlock(mpb, i);
+                                    if (mpb.GetColor("_BuildingEmission") == gmr.shaderRed) { mat = gmr.ghostMaterialRed; break; }
+                                }
+                            }
+                            if (mat == gmr.ghostMaterialRed) break;
+                        }
                     }
                 }
                 catch { }
@@ -1351,12 +1381,36 @@ namespace PickUpMove
                     ghost.transform.TransformPoint(p.LPos), ghost.transform.rotation * p.LRot);
                 if (remat)
                     foreach (var r in p.Go.GetComponentsInChildren<Renderer>())
-                    {
-                        var mats = r.sharedMaterials;
-                        for (int i = 0; i < mats.Length; i++) mats[i] = mat;
-                        r.sharedMaterials = mats;
-                    }
+                        TintPreviewRenderer(r, mat, gmr);
             }
+        }
+
+        // Vanilla-faithful tint (mirror of MaterialRendConnection.SetMaterial): paint-shader slots
+        // keep their textured material and glow green/red via '_BuildingEmission'; other slots get
+        // the ghost material swapped in. Green<->red re-tints work: paint slots re-emit, swapped
+        // slots just swap green<->red assets.
+        private static void TintPreviewRenderer(Renderer r, Material mat, GameManager gm)
+        {
+            if (r == null || mat == null) return;
+            try
+            {
+                var shared = r.sharedMaterials;
+                MaterialPropertyBlock mpb = null;
+                for (int i = 0; i < shared.Length; i++)
+                {
+                    var m = shared[i]; if (m == null) continue;
+                    if (gm != null && m.shader == gm.blockPaintShader)
+                    {
+                        if (mpb == null) mpb = new MaterialPropertyBlock();
+                        r.GetPropertyBlock(mpb, i);
+                        mpb.SetColor("_BuildingEmission", mat == gm.ghostMaterialGreen ? gm.shaderGreen : gm.shaderRed);
+                        r.SetPropertyBlock(mpb, i);
+                    }
+                    else shared[i] = mat;
+                }
+                r.sharedMaterials = shared;
+            }
+            catch { }
         }
 
         private static void DestroyGhostPreviews()
