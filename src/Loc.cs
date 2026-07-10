@@ -89,6 +89,19 @@ namespace PickUpMove
                 ["ja"]="ジップラインを動かす前にロープを外してください。",
                 ["ko"]="집라인을 옮기기 전에 밧줄을 먼저 분리하세요.", ["pl"]="Odłącz linę przed przeniesieniem tyrolki." },
 
+            ["group"] = new Dictionary<string, string> {
+                ["en"]="Items on top only stay on the same surface type.",
+                ["ru"]="Предметы сверху сохраняются только на той же поверхности.",
+                ["de"]="Gegenstände darauf bleiben nur auf demselben Untergrundtyp erhalten.",
+                ["fr"]="Les objets posés dessus ne sont conservés que sur le même type de surface.",
+                ["it"]="Gli oggetti sopra restano solo sullo stesso tipo di superficie.",
+                ["pl"]="Przedmioty na górze zostają tylko na tym samym typie powierzchni.",
+                ["pt"]="Os itens em cima só permanecem no mesmo tipo de superfície.",
+                ["sv"]="Föremål ovanpå behålls bara på samma typ av yta.",
+                ["zh"]="上面的物品只有在相同表面类型上才能保留。",
+                ["ja"]="上に載った物は同じ設置面タイプでのみ保持されます。",
+                ["ko"]="위에 놓인 물건은 같은 표면 유형에서만 유지됩니다.",
+            },
             ["surface"] = new Dictionary<string, string> {
                 ["en"]="It only keeps its contents on the same surface type.",
                 ["ru"]="Содержимое сохраняется только на той же поверхности.",

@@ -1520,6 +1520,13 @@ namespace PickUpMove
                 // Those are teleport-only: same surface type keeps the same prefab -> same object.
                 if (HasUnhandledState(original))
                 { NoteHud(Loc.T("surface")); SuppressVanillaPlaceThisFrame(bc); return; }
+                // CARRIED GROUP gate (07-11): a variant switch converts the block (floor table ->
+                // WALL-mounted table); the stack on top cannot ride that - observed: recreate moved
+                // 3 of 4 deps, the 4th detached, and the wall-variant table later cascade-broke
+                // (vanilla break animation) since nothing wall-worthy supported it. With deps the
+                // move is teleport-only; refuse the conversion instead of maiming the group.
+                if (_carryDeps.Count > 0 || _pickupScan != null)
+                { NoteHud(Loc.T("group")); SuppressVanillaPlaceThisFrame(bc); return; }
                 Block nb;
                 try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
                 catch (System.Exception ex)
@@ -1570,8 +1577,14 @@ namespace PickUpMove
                 {
                     // same teleport-only gate as the host branch, checked locally to save the round
                     // trip (the host enforces it authoritatively anyway via refusal relay)
-                    if (!SameVariant(original, item, dps) && HasUnhandledState(original))
-                    { NoteHud(Loc.T("surface")); SuppressVanillaPlaceThisFrame(bc); return; }
+                    if (!SameVariant(original, item, dps))
+                    {
+                        if (HasUnhandledState(original))
+                        { NoteHud(Loc.T("surface")); SuppressVanillaPlaceThisFrame(bc); return; }
+                        // same carried-group gate as the host branch (see comment there)
+                        if (_carryDeps.Count > 0 || _pickupScan != null)
+                        { NoteHud(Loc.T("group")); SuppressVanillaPlaceThisFrame(bc); return; }
+                    }
                     if (player.Network == null) { Warn("client move: no Network."); AbortKeepOriginal(); return; }
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
                     { NoteHud(Loc.T("no_host")); AbortKeepOriginal(); return; }
