@@ -16,7 +16,9 @@ it one tile over.
 - **Battery chargers, biofuel refiners, fuel tanks** — batteries, fuel and contents stay in.
 - **Pipes** — the network rewires itself around the new spot.
 - **Signs / plaques** — keeps the written text.
-- **Decor, furniture, plain placeables.** Items standing on top are carried along. Paint survives.
+- **Decor, furniture, plain placeables.** Items standing on top are carried along — the placement
+  ghost previews the whole group (and live contents like batteries), tinted vanilla green/red.
+  Paint survives.
 
 Two hard exceptions: the **detail plank** (its stretch mechanic doesn't survive a move) and a
 **zipline with a rope attached** — detach the rope first (the mod says so in-game). If a specific
