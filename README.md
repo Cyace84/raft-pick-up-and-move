@@ -12,12 +12,17 @@ it one tile over.
 
 - **Storage** — small, medium, large, wall cabinets. Items stay inside.
 - **Cooking** — cooking pot, grill, juicer, smelter, purifier. Recipe, progress and slots survive.
-- **Power/water devices** that the game knows how to restore — fuel tank, wind turbine, and similar.
+- **Crop plots, scarecrows, beehives** — plants, integrity and combs survive.
+- **Battery chargers, biofuel refiners, fuel tanks** — batteries, fuel and contents stay in.
+- **Pipes** — the network rewires itself around the new spot.
 - **Signs / plaques** — keeps the written text.
-- **Decor, furniture, plain placeables.**
+- **Decor, furniture, plain placeables.** Items standing on top are carried along. Paint survives.
 
-If an object has device state the mod can't safely carry yet (some planters/sprinklers/recyclers),
-it simply **refuses to move** rather than risk losing that state. Nothing is ever silently dropped.
+Two hard exceptions: the **detail plank** (its stretch mechanic doesn't survive a move) and a
+**zipline with a rope attached** — detach the rope first (the mod says so in-game). If a specific
+move would lose device state (e.g. a filled container onto a different surface type), the mod
+**refuses with an on-screen note** rather than risk it. Notes are localized (11 languages).
+Nothing is ever silently dropped.
 
 ## Install
 
