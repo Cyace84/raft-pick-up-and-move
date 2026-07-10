@@ -1,0 +1,44 @@
+[size=5][b]Pick Up & Move[/b][/size]
+
+Pick up almost anything you have built and set it back down somewhere else — with everything still inside. Aim at it, press a key, and the normal build ghost follows your cursor until you click to drop it.
+
+No more emptying a chest into your hands just to nudge it one tile over. No more smashing a misplaced smelter for half the materials.
+
+[size=4][b]What can be moved[/b][/size]
+Nearly the whole catalog of placed items:
+[list]
+[*]Storages (small, medium, large) — contents intact
+[*]Crop plots — plants keep growing
+[*]Grills, smelters, purifiers, biofuel refiners — fuel and contents intact
+[*]Battery chargers — batteries and fuel stay in
+[*]Pipes — the network rewires itself around the new spot
+[*]Scarecrows, beehives, furniture, lights, decorations, and the rest
+[/list]
+Items standing on top of a moved block are carried along with it. Paint is preserved.
+
+Two exceptions: the detail plank (its stretch mechanic doesn't survive a move) and a zipline with a rope attached — detach the rope first, the mod tells you so in-game.
+
+[size=4][b]How to use[/b][/size]
+Look at a placed item and press the move key (default [b]M[/b]). It lifts into placement mode and a ghost tracks your aim. Left-click to place it. Right-click, or press the key again, to cancel.
+
+If a move isn't possible (wrong surface for a filled container, unsupported spot, and so on), a short on-screen note tells you why — in your game's language (11 languages: English, German, French, Italian, Polish, Portuguese, Russian, Swedish, Chinese, Japanese, Korean).
+
+Change the key in [font=Courier New]BepInEx/config/com.cyace84.pickupmove.cfg[/font].
+
+[size=4][b]Multiplayer[/b][/size]
+Works in co-op, as host or as a client — anyone with the mod can move things, and moves show up live for every other player running the mod. A player without the mod sees the new position after rejoining (it is saved correctly). For a clean co-op experience, everyone should run the same DLL.
+
+[size=4][b]Requirements[/b][/size]
+[list]
+[*][url=https://docs.bepinex.dev/]BepInEx 5[/url] (Mono build) for Raft.
+[/list]
+
+[size=4][b]Install[/b][/size]
+[list=1]
+[*]Install BepInEx 5 (Mono) for Raft and run the game once so it sets itself up.
+[*]Extract this archive into your Raft folder. The DLL lands in [font=Courier New]BepInEx/plugins/[/font].
+[*]Start the game once more so the config file gets written.
+[/list]
+
+[size=4][b]Source[/b][/size]
+[url=https://github.com/Cyace84/raft-movable-storage]github.com/Cyace84/raft-movable-storage[/url] (MIT).
