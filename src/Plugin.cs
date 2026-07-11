@@ -122,6 +122,13 @@ namespace PickUpMove
         // deadline (observed: '+121f' fail vs 4.01s success on identical moves).
         private static int _hostLastLoggedStable; // -1 unknown, 0 false, 1 true (log only on change)
         private static Paint _hostPaint;
+        // DATA-LOSS GATE state (07-11, the purple chest): restore is READ-BACK VERIFIED and the
+        // original is removed only after proof. See TryRestoreSlotsVerified for the mechanism.
+        private static bool _hostBaseVerified;   // base block's slots restored + read back
+        private static bool _hostDepsMoved;      // TryMoveDependents already ran (must not re-run)
+        private static string _hostRestoreWait;  // last logged wait reason (log on change only)
+        private sealed class DepRestore { public Block Nd; public RGD_Slot[] Slots; public bool Retried; }
+        private static readonly List<DepRestore> _pendingDepRestores = new List<DepRestore>();
         private Harmony _harmony;
         private static GameObject _tickerGo;
 
@@ -917,22 +924,57 @@ namespace PickUpMove
             if (nb is Storage_Small ns && slots != null)
             {
                 ns.GetInventoryReference()?.SetSlotsFromRGD(slots);
-                if (player?.Network != null && player.StorageManager != null)
-                {
-                    try
-                    {
-                        var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
-                        if (Raft_Network.IsHost)
-                            player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
-                        else
-                            player.SendP2P(sync, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game); // client -> host, like the old storage path
-                    }
-                    catch (System.Exception ex) { Warn("content-sync send failed: " + ex.Message); }
-                }
+                SendStorageSync(ns, player);
             }
             ApplyDeviceState(rgd, nb);
             ApplyPaint(nb, paint, player);
             ApplySignText(nb, text);
+        }
+
+        private static void SendStorageSync(Storage_Small ns, Network_Player player)
+        {
+            if (player?.Network == null || player.StorageManager == null) return;
+            try
+            {
+                var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
+                if (Raft_Network.IsHost)
+                    player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                else
+                    player.SendP2P(sync, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game); // client -> host, like the old storage path
+            }
+            catch (System.Exception ex) { Warn("content-sync send failed: " + ex.Message); }
+        }
+
+        // THE PURPLE-CHEST GATE (07-11). Storage_Small.OnFinishedPlacement REPLACES
+        // inventoryReference with a fresh empty Instantiate (decomp Storage_Small.cs:80). On the
+        // WALL variant it runs AFTER our +1f restore, so SetSlotsFromRGD wrote 20 slots into an
+        // inventory object that was thrown away a frame later - 'restored 20 slots' logged success
+        // while the chest was empty (self-20260711-012429.log 03:26:14->03:26:22; save diff: chest
+        // idx 28159/20 items replaced by idx 50280/0). Deterministic order, no timing guesses:
+        //   1. registration gate: allStorages.Contains(ns) marks OnFinishedPlacement DONE - the
+        //      inventory it swapped in is the final one. Never write before that.
+        //   2. write, then READ BACK: filled slots in the live inventory must equal the carried
+        //      filled count. Only then may the caller destroy the original.
+        // Callers poll this across frames; on their deadline they revert the whole move.
+        private static bool TryRestoreSlotsVerified(Block nb, RGD_Slot[] slots, out string why)
+        {
+            why = null;
+            var ns = nb as Storage_Small;
+            if (ns == null || slots == null) return true; // nothing to restore -> trivially verified
+            try
+            {
+                if (StorageManager.allStorages == null || !StorageManager.allStorages.Contains(ns))
+                { why = "storage not registered yet (OnFinishedPlacement pending)"; return false; }
+                var inv = ns.GetInventoryReference();
+                if (inv == null) { why = "inventory not created yet"; return false; }
+                inv.SetSlotsFromRGD(slots);
+                int expected = 0; foreach (var s in slots) if (s != null && s.HasItem) expected++;
+                int actual = 0;
+                foreach (var sl in inv.allSlots) if (sl != null && !sl.IsEmpty) actual++;
+                if (actual != expected) { why = $"read-back {actual}/{expected} filled slots"; return false; }
+                return true;
+            }
+            catch (System.Exception ex) { why = "restore threw: " + ex.Message; return false; }
         }
 
         // Detect the cascade tree of `original` (what removing it would destroy) and re-create each piece
@@ -1014,6 +1056,10 @@ namespace PickUpMove
                     if (nd == null) { failMsg = "Didn't move the stack - couldn't recreate a piece on top."; return false; }
                     _newDependents.Add(nd);
                     ApplyState(nd, c.slots, c.rgd, c.paint, c.text, player);
+                    // dep storages join the read-back verification queue (purple-chest gate);
+                    // PollHostVerify won't remove ANY original until every entry verifies.
+                    if (nd is Storage_Small && c.slots != null)
+                        _pendingDepRestores.Add(new DepRestore { Nd = nd, Slots = c.slots });
                     _depOriginals.Add(c.original);
                 }
                 _depMovedCount = captured.Count;
@@ -1556,6 +1602,7 @@ namespace PickUpMove
                 _hostVerifyStart = Time.frameCount;
                 _hostVerifyDeadlineTime = Time.realtimeSinceStartup + 6f; // wall-clock; slow settlers (recycler ~4s) fit
                 _hostLastLoggedStable = -1;
+                _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
                 _hostVerifying = true;
                 Trace($"placing nb@{nb.transform.localPosition.ToString("F2")}; verifying support...");
 
@@ -2200,7 +2247,9 @@ namespace PickUpMove
             _hostNb = nb; _hostOriginal = original; _hostSlots = slots; _hostText = text; _hostRgd = rgd; _hostPaint = paint;
             _hostReqSender = req.Sender; _hostReqRecvTime = req.RecvTime;
             _hostVerifyStart = Time.frameCount; _hostVerifyDeadlineTime = Time.realtimeSinceStartup + 6f;
-            _hostLastLoggedStable = -1; _hostVerifying = true;
+            _hostLastLoggedStable = -1;
+            _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
+            _hostVerifying = true;
             Trace($"client-requested move: verifying nb@{nb.transform.localPosition.ToString("F2")}");
         }
 
@@ -2271,6 +2320,14 @@ namespace PickUpMove
                     // grace expiring with the block present but never reading stable: restore anyway -
                     // silently dropping the restore here is what lost paint/contents on the client's view.
                     if (!best.IsStable()) Warn("client: new block never read stable locally; restoring its state anyway.");
+                    // purple-chest gate, client view: wait for the final inventory + read back before
+                    // calling it restored; keep polling until the grace runs out, then apply loudly.
+                    if (!TryRestoreSlotsVerified(best, _clientMoveSlots, out string cw) && !graceOver)
+                    {
+                        if (cw != _hostRestoreWait) { Trace($"client restore wait: {cw}"); _hostRestoreWait = cw; }
+                        return; // retry next tick
+                    }
+                    if (cw != null) Warn($"client: storage restore unverified ({cw}); applying anyway.");
                     var player = ComponentManager<Network_Player>.Value;
                     try { ApplyState(best, _clientMoveSlots, _clientMoveRgd, _clientMovePaint, _clientMoveText, player); }
                     catch (System.Exception ex) { Warn("client local restore: " + ex.Message); }
@@ -2302,6 +2359,7 @@ namespace PickUpMove
                 RestoreHidden();
                 if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "r_move_failed");
                 _hostVerifying = false; _hostOriginal = null; _hostSlots = null; _hostReqSender = default;
+                _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
                 Warn("host verify: placed chest vanished before settling; original restored, nothing lost.");
                 return;
             }
@@ -2320,8 +2378,27 @@ namespace PickUpMove
                 var slots = _hostSlots;
                 var player = ComponentManager<Network_Player>.Value;
 
-                // the moved block's own state (slots / device / paint / sign).
-                ApplyState(nb, slots, _hostRgd, _hostPaint, _hostText, player);
+                // PHASE A - the moved block's own state, slots READ-BACK VERIFIED (purple-chest
+                // gate): wait for vanilla's OnFinishedPlacement, write, read back. Until verified
+                // the original is untouched, so the deadline revert below loses nothing.
+                if (!_hostBaseVerified)
+                {
+                    if (!TryRestoreSlotsVerified(nb, slots, out string wait))
+                    {
+                        if (wait != _hostRestoreWait) { Trace($"restore wait: {wait}"); _hostRestoreWait = wait; }
+                        if (Time.realtimeSinceStartup <= _hostVerifyDeadlineTime) return; // retry next frame
+                        Warn($"restore never verified ({wait}) - reverting the move, original kept.");
+                        stable = false; // fall through to the deadline revert below
+                    }
+                    else
+                    {
+                        ApplyState(nb, slots, _hostRgd, _hostPaint, _hostText, player);
+                        _hostBaseVerified = true;
+                    }
+                }
+
+                if (stable)
+                {
 
                 // GROUP MOVE: anything resting on the original (decor on a table, a stack) would be
                 // cascaded away when we remove it. Detect that exact cascade set with the game's own
@@ -2330,18 +2407,55 @@ namespace PickUpMove
                 // A->A' offset and replay its state. Atomic: if any piece has state we can't carry or a
                 // re-create fails, undo EVERYTHING (discard nb + new pieces, restore the original) so the
                 // stack is never half-moved or lost.
-                if (!TryMoveDependents(original, nb, player, out string depFail))
+                if (!_hostDepsMoved)
                 {
-                    DiscardNewDependents();
-                    RestoreDependentColliders();
-                    _plantBroadcastPlots.Clear(); // undone move - nothing to announce
-                    DeregisterCropplotPlants(nb); // its restored plants are registered - don't shadow the surviving original
-                    try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
-                    RestoreHidden();
-                    Note(depFail);
-                    if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, depFail);
-                    _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
-                    return;
+                    if (!TryMoveDependents(original, nb, player, out string depFail))
+                    {
+                        DiscardNewDependents();
+                        RestoreDependentColliders();
+                        _plantBroadcastPlots.Clear(); // undone move - nothing to announce
+                        DeregisterCropplotPlants(nb); // its restored plants are registered - don't shadow the surviving original
+                        try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
+                        RestoreHidden();
+                        Note(depFail);
+                        if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, depFail);
+                        _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
+                        _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
+                        return;
+                    }
+                    _hostDepsMoved = true;
+                }
+
+                // PHASE B - dependent storages (a chest in the carried stack) go through the SAME
+                // read-back gate before any original is removed. Entries that needed a retry get
+                // their content-sync re-sent (the one ApplyState sent may have carried an empty
+                // inventory). Deadline -> full undo, stack intact.
+                {
+                    string depWait = null;
+                    foreach (var pr in _pendingDepRestores)
+                    {
+                        if (pr.Nd == null) continue;
+                        if (!TryRestoreSlotsVerified(pr.Nd, pr.Slots, out string w)) { pr.Retried = true; depWait = pr.Nd.name + ": " + w; break; }
+                    }
+                    if (depWait != null)
+                    {
+                        if (depWait != _hostRestoreWait) { Trace($"dep restore wait: {depWait}"); _hostRestoreWait = depWait; }
+                        if (Time.realtimeSinceStartup <= _hostVerifyDeadlineTime) return; // retry next frame
+                        Warn($"dep restore never verified ({depWait}) - reverting the whole move.");
+                        DiscardNewDependents();
+                        RestoreDependentColliders();
+                        _plantBroadcastPlots.Clear();
+                        DeregisterCropplotPlants(nb);
+                        try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
+                        RestoreHidden();
+                        if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, "r_move_failed");
+                        _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
+                        _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
+                        return;
+                    }
+                    foreach (var pr in _pendingDepRestores)
+                        if (pr.Retried && pr.Nd is Storage_Small prs) SendStorageSync(prs, player);
+                    _pendingDepRestores.Clear();
                 }
 
                 _hiddenColliders.Clear();
@@ -2363,7 +2477,9 @@ namespace PickUpMove
                     + (_depMovedCount > 0 ? $"; moved {_depMovedCount} on top" : ""));
                 if (_hostReqSender.IsValid()) Note($"[t] client move total {Time.realtimeSinceStartup - _hostReqRecvTime:F2}s (recv -> original removed)");
                 _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
+                _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null;
                 return;
+                }
             }
 
             if (Time.realtimeSinceStartup > _hostVerifyDeadlineTime)
@@ -2376,6 +2492,7 @@ namespace PickUpMove
                 Note("host place fail at +" + delta + "f"); NoteHud(Loc.T("no_support"));
                 if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "no_support");
                 _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
+                _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
             }
         }
 
