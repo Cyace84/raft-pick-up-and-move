@@ -129,6 +129,50 @@ namespace PickUpMove
         private static string _hostRestoreWait;  // last logged wait reason (log on change only)
         private sealed class DepRestore { public Block Nd; public RGD_Slot[] Slots; public bool Retried; }
         private static readonly List<DepRestore> _pendingDepRestores = new List<DepRestore>();
+        // RESTORE WATCHDOG: the purple-chest wipe passed a same-frame 'restored N slots' claim, and
+        // the trigger is still UNKNOWN (1 loss / 18 wall conversions; autosave adjacency suspected,
+        // not proven - conversions next to autosaves also succeed). So after every verified restore
+        // the chest is WATCHED for 20s: contents vanishing while the chest was NEVER OPENED cannot
+        // be the player (emptying requires opening) -> loud WARN + re-apply from the captured slots.
+        // Whatever the wiper is, it now leaves evidence and heals itself. Opening the chest ends the
+        // watch (the player owns the state from then on; re-applying after a legit take = dupe).
+        private sealed class RestoreWatch { public Storage_Small Ns; public RGD_Slot[] Slots; public float Until; public int Expected; }
+        private static readonly List<RestoreWatch> _restoreWatches = new List<RestoreWatch>();
+
+        private static void WatchRestore(Block nb, RGD_Slot[] slots)
+        {
+            var ns = nb as Storage_Small;
+            if (ns == null || slots == null) return;
+            int expected = 0; foreach (var s in slots) if (s != null && s.HasItem) expected++;
+            if (expected == 0) return;
+            _restoreWatches.Add(new RestoreWatch { Ns = ns, Slots = slots, Until = Time.realtimeSinceStartup + 20f, Expected = expected });
+        }
+
+        private static void PollRestoreWatches()
+        {
+            if (_restoreWatches.Count == 0) return;
+            for (int i = _restoreWatches.Count - 1; i >= 0; i--)
+            {
+                var w = _restoreWatches[i];
+                if (w.Ns == null) { _restoreWatches.RemoveAt(i); continue; }        // destroyed/moved again
+                if (w.Ns.IsOpen) { _restoreWatches.RemoveAt(i); continue; }         // player took over
+                if (Time.realtimeSinceStartup > w.Until) { _restoreWatches.RemoveAt(i); continue; }
+                try
+                {
+                    var inv = w.Ns.GetInventoryReference();
+                    if (inv == null) continue;
+                    int filled = 0; foreach (var sl in inv.allSlots) if (sl != null && !sl.IsEmpty) filled++;
+                    if (filled == 0)
+                    {
+                        Warn($"WATCHDOG: '{w.Ns.name}' lost its {w.Expected} restored slots without ever being opened"
+                            + $" ({(w.Until - Time.realtimeSinceStartup):F1}s left on watch) - re-applying. THIS IS THE PURPLE-CHEST WIPER; report this log line.");
+                        inv.SetSlotsFromRGD(w.Slots);
+                        SendStorageSync(w.Ns, ComponentManager<Network_Player>.Value);
+                    }
+                }
+                catch (System.Exception ex) { Warn("watchdog: " + ex.Message); _restoreWatches.RemoveAt(i); }
+            }
+        }
         private Harmony _harmony;
         private static GameObject _tickerGo;
 
@@ -246,6 +290,7 @@ namespace PickUpMove
             if (_reqScan != null) StepDepScan(_reqScan);
             if (_pickupScan != null) StepDepScan(_pickupScan);
             if (_awaitingHostMove) PollClientMove();
+            PollRestoreWatches(); // purple-chest watchdog: must run even while other moves verify
             if (_tpVerifying) { PollTeleportVerify(); return; }
             if (_hostVerifying) { PollHostVerify(); return; }
 
@@ -2329,7 +2374,7 @@ namespace PickUpMove
                     }
                     if (cw != null) Warn($"client: storage restore unverified ({cw}); applying anyway.");
                     var player = ComponentManager<Network_Player>.Value;
-                    try { ApplyState(best, _clientMoveSlots, _clientMoveRgd, _clientMovePaint, _clientMoveText, player); }
+                    try { ApplyState(best, _clientMoveSlots, _clientMoveRgd, _clientMovePaint, _clientMoveText, player); WatchRestore(best, _clientMoveSlots); }
                     catch (System.Exception ex) { Warn("client local restore: " + ex.Message); }
                     _clientMoveRestored = true;
                 }
@@ -2393,6 +2438,7 @@ namespace PickUpMove
                     else
                     {
                         ApplyState(nb, slots, _hostRgd, _hostPaint, _hostText, player);
+                        WatchRestore(nb, slots);
                         _hostBaseVerified = true;
                     }
                 }
@@ -2454,7 +2500,10 @@ namespace PickUpMove
                         return;
                     }
                     foreach (var pr in _pendingDepRestores)
+                    {
                         if (pr.Retried && pr.Nd is Storage_Small prs) SendStorageSync(prs, player);
+                        WatchRestore(pr.Nd, pr.Slots);
+                    }
                     _pendingDepRestores.Clear();
                 }
 
