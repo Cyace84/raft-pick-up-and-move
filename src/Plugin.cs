@@ -1012,6 +1012,31 @@ namespace PickUpMove
                 { why = "storage not registered yet (OnFinishedPlacement pending)"; return false; }
                 var inv = ns.GetInventoryReference();
                 if (inv == null) { why = "inventory not created yet"; return false; }
+                if (inv.allSlots.Count == 0)
+                {
+                    // CASE CLOSED (07-11): with the HUD hidden (InventoryParent inactive - e.g. our
+                    // raft-hud.sh screenshot tool, or any hide-HUD mod) the freshly Instantiated
+                    // inventory never gets Awake -> InitializeSlots -> allSlots stays empty and every
+                    // slot write is a silent no-op. THAT was the purple-chest wiper (user repro:
+                    // 'HUD off -> chest loses slots'). Wake it manually: borrow the nearest ACTIVE
+                    // ancestor as parent for one synchronous activate (Awake runs inside SetActive),
+                    // then put everything back exactly as it was.
+                    var t = inv.transform; var home = t.parent;
+                    Transform refuge = home;
+                    while (refuge != null && !refuge.gameObject.activeInHierarchy) refuge = refuge.parent;
+                    if (refuge != null && refuge != home)
+                    {
+                        var lp = t.localPosition; var ls = t.localScale;
+                        bool wasActive = inv.gameObject.activeSelf;
+                        t.SetParent(refuge, false);
+                        inv.gameObject.SetActive(true);      // synchronous Awake -> InitializeSlots
+                        inv.gameObject.SetActive(wasActive); // restore state before anything renders
+                        t.SetParent(home, false);
+                        t.localPosition = lp; t.localScale = ls;
+                        Note($"inventory UI woken under inactive HUD ({inv.allSlots.Count} slots initialized).");
+                    }
+                    if (inv.allSlots.Count == 0) { why = "inventory UI never initialized (HUD hidden?)"; return false; }
+                }
                 inv.SetSlotsFromRGD(slots);
                 int expected = 0; foreach (var s in slots) if (s != null && s.HasItem) expected++;
                 int actual = 0;
