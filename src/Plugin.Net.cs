@@ -611,6 +611,80 @@ namespace PickUpMove
             ResetHostVerify();
         }
 
+        // PHASE A - the moved block's own state, slots read-back verified (storage restore gate):
+        // wait for vanilla's OnFinishedPlacement, write, read back. Until verified the original is
+        // untouched, so the deadline revert loses nothing. False = done for this frame (retrying,
+        // or already reverted on deadline).
+        private static bool VerifyBaseRestore(Block nb, RGD_Slot[] slots, Network_Player player, int delta)
+        {
+            if (_hostBaseVerified) return true;
+            if (TryRestoreSlotsVerified(nb, slots, out string wait))
+            {
+                ApplyState(nb, slots, _hostRgd, _hostPaint, _hostText, player);
+                WatchRestore(nb, slots);
+                _hostBaseVerified = true;
+                return true;
+            }
+            if (wait != _hostRestoreWait) { Trace($"restore wait: {wait}"); _hostRestoreWait = wait; }
+            if (Time.realtimeSinceStartup <= _hostVerifyDeadlineTime) return false; // retry next frame
+            Warn($"restore never verified ({wait}) - reverting the move, original kept.");
+            HostVerifyDeadline(delta);
+            return false;
+        }
+
+        // GROUP MOVE: anything resting on the original (decor on a table, a stack) would be
+        // cascaded away when we remove it. Detect that exact cascade set with the game's own
+        // predicate - with the original's colliders disabled (as they've been all carry) a block
+        // it supported reads !IsStable() - then re-create each on the moved block by the same rigid
+        // A->A' offset and replay its state. Atomic: if any piece has state we can't carry or a
+        // re-create fails, undo EVERYTHING (discard nb + new pieces, restore the original) so the
+        // stack is never half-moved or lost. False = move undone, refusal sent, state reset.
+        private static bool MoveDependentsOnce(Block nb, Block original, Network_Player player)
+        {
+            if (_hostDepsMoved) return true;
+            if (!TryMoveDependents(original, nb, player, out string depFail))
+            {
+                UndoHostMove(nb);
+                Note(depFail);
+                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, depFail);
+                ResetHostVerify();
+                return false;
+            }
+            _hostDepsMoved = true;
+            return true;
+        }
+
+        // PHASE B - dependent storages (a chest in the carried stack) go through the SAME read-back
+        // gate before any original is removed. Entries that needed a retry get their content-sync
+        // re-sent (the one ApplyState sent may have carried an empty inventory). False = done for
+        // this frame (retrying, or the whole move reverted on deadline).
+        private static bool VerifyDepRestores(Block nb, Block original, Network_Player player)
+        {
+            string depWait = null;
+            foreach (var pr in _pendingDepRestores)
+            {
+                if (pr.Nd == null) continue;
+                if (!TryRestoreSlotsVerified(pr.Nd, pr.Slots, out string w)) { pr.Retried = true; depWait = pr.Nd.name + ": " + w; break; }
+            }
+            if (depWait != null)
+            {
+                if (depWait != _hostRestoreWait) { Trace($"dep restore wait: {depWait}"); _hostRestoreWait = depWait; }
+                if (Time.realtimeSinceStartup <= _hostVerifyDeadlineTime) return false; // retry next frame
+                Warn($"dep restore never verified ({depWait}) - reverting the whole move.");
+                UndoHostMove(nb);
+                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, "r_move_failed");
+                ResetHostVerify();
+                return false;
+            }
+            foreach (var pr in _pendingDepRestores)
+            {
+                if (pr.Retried && pr.Nd is Storage_Small prs) SendStorageSync(prs, player);
+                WatchRestore(pr.Nd, pr.Slots);
+            }
+            _pendingDepRestores.Clear();
+            return true;
+        }
+
         private static void PollHostVerify()
         {
             if (_hostNb == null) { HostVerifyVanished(); return; }
@@ -628,82 +702,11 @@ namespace PickUpMove
                 var original = _hostOriginal;
                 var slots = _hostSlots;
                 var player = ComponentManager<Network_Player>.Value;
-
-                // PHASE A - the moved block's own state, slots read-back verified (storage restore
-                // gate): wait for vanilla's OnFinishedPlacement, write, read back. Until verified
-                // the original is untouched, so the deadline revert below loses nothing.
-                if (!_hostBaseVerified)
-                {
-                    if (!TryRestoreSlotsVerified(nb, slots, out string wait))
-                    {
-                        if (wait != _hostRestoreWait) { Trace($"restore wait: {wait}"); _hostRestoreWait = wait; }
-                        if (Time.realtimeSinceStartup <= _hostVerifyDeadlineTime) return; // retry next frame
-                        Warn($"restore never verified ({wait}) - reverting the move, original kept.");
-                        stable = false; // fall through to the deadline revert below
-                    }
-                    else
-                    {
-                        ApplyState(nb, slots, _hostRgd, _hostPaint, _hostText, player);
-                        WatchRestore(nb, slots);
-                        _hostBaseVerified = true;
-                    }
-                }
-
-                if (stable)
-                {
-
-                // GROUP MOVE: anything resting on the original (decor on a table, a stack) would be
-                // cascaded away when we remove it. Detect that exact cascade set with the game's own
-                // predicate - with the original's colliders disabled (as they've been all carry) a block
-                // it supported reads !IsStable() - then re-create each on the moved block by the same rigid
-                // A->A' offset and replay its state. Atomic: if any piece has state we can't carry or a
-                // re-create fails, undo EVERYTHING (discard nb + new pieces, restore the original) so the
-                // stack is never half-moved or lost.
-                if (!_hostDepsMoved)
-                {
-                    if (!TryMoveDependents(original, nb, player, out string depFail))
-                    {
-                        UndoHostMove(nb);
-                        Note(depFail);
-                        if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, depFail);
-                        ResetHostVerify();
-                        return;
-                    }
-                    _hostDepsMoved = true;
-                }
-
-                // PHASE B - dependent storages (a chest in the carried stack) go through the SAME
-                // read-back gate before any original is removed. Entries that needed a retry get
-                // their content-sync re-sent (the one ApplyState sent may have carried an empty
-                // inventory). Deadline -> full undo, stack intact.
-                {
-                    string depWait = null;
-                    foreach (var pr in _pendingDepRestores)
-                    {
-                        if (pr.Nd == null) continue;
-                        if (!TryRestoreSlotsVerified(pr.Nd, pr.Slots, out string w)) { pr.Retried = true; depWait = pr.Nd.name + ": " + w; break; }
-                    }
-                    if (depWait != null)
-                    {
-                        if (depWait != _hostRestoreWait) { Trace($"dep restore wait: {depWait}"); _hostRestoreWait = depWait; }
-                        if (Time.realtimeSinceStartup <= _hostVerifyDeadlineTime) return; // retry next frame
-                        Warn($"dep restore never verified ({depWait}) - reverting the whole move.");
-                        UndoHostMove(nb);
-                        if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, "r_move_failed");
-                        ResetHostVerify();
-                        return;
-                    }
-                    foreach (var pr in _pendingDepRestores)
-                    {
-                        if (pr.Retried && pr.Nd is Storage_Small prs) SendStorageSync(prs, player);
-                        WatchRestore(pr.Nd, pr.Slots);
-                    }
-                    _pendingDepRestores.Clear();
-                }
-
+                if (!VerifyBaseRestore(nb, slots, player, delta)) return;
+                if (!MoveDependentsOnce(nb, original, player)) return;
+                if (!VerifyDepRestores(nb, original, player)) return;
                 FinishHostMove(nb, original, slots, player, delta);
                 return;
-                }
             }
 
             if (Time.realtimeSinceStartup > _hostVerifyDeadlineTime) HostVerifyDeadline(delta);
