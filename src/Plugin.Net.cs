@@ -567,7 +567,7 @@ namespace PickUpMove
         {
             if (_hostNb == null)
             {
-                RestoreHidden();
+                UndoHostMove(null); // also discards any dependents already re-created this verify
                 if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "r_move_failed");
                 ResetHostVerify();
                 Warn("host verify: placed chest vanished before settling; original restored, nothing lost.");
@@ -685,10 +685,9 @@ namespace PickUpMove
 
             if (Time.realtimeSinceStartup > _hostVerifyDeadlineTime)
             {
-                _plantBroadcastPlots.Clear(); // undone move - nothing to announce
-                DeregisterCropplotPlants(_hostNb); // undo path: the new block's registered plants must not shadow the original
-                try { BlockCreator.RemoveBlockNetwork(_hostNb, null, true); } catch { }
-                RestoreHidden();
+                // UndoHostMove also discards dependents: reachable when the block settled, deps were
+                // re-created, and THEN it lost support - the old code left those copies standing.
+                UndoHostMove(_hostNb);
                 LogStability(_hostNb); // which gizmo cell(s) never found support
                 Note("host place fail at +" + delta + "f"); NoteHud(Loc.T("no_support"));
                 if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "no_support");
