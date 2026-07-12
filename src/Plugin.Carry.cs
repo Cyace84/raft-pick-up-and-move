@@ -269,6 +269,22 @@ namespace PickUpMove
         }
 
         // Read the vanilla ghost, remove the original, recreate at the new spot, restore inventory.
+        // A variant switch means RECREATE, and recreation has two hard gates, shared by the host
+        // and client paths. (1) Recreation replays state through our RGD adapters; a stateful type
+        // we have no adapter for must not be rebuilt (state would be lost) - those are teleport-only:
+        // same surface type keeps the same prefab -> same object. (2) A carried group cannot ride a
+        // conversion (floor table -> wall-mounted table): one such move carried 3 of 4 deps, the 4th
+        // detached, and the converted table later cascade-broke since nothing wall-worthy supported
+        // it. True = refused; hud note shown, vanilla placement suppressed.
+        private static bool RefuseRecreate(BlockCreator bc, Block original)
+        {
+            if (HasUnhandledState(original))
+            { NoteHud(Loc.T("surface")); SuppressVanillaPlaceThisFrame(bc); return true; }
+            if (_carryDeps.Count > 0 || _pickupScan != null)
+            { NoteHud(Loc.T("group")); SuppressVanillaPlaceThisFrame(bc); return true; }
+            return false;
+        }
+
         internal static void ConfirmMove(BlockCreator bc)
         {
             var ghost = bc.selectedBlock;
@@ -321,18 +337,8 @@ namespace PickUpMove
                     ExitBuildMode();
                     return;
                 }
-                // Variant differs -> RECREATE. Recreation replays state through our RGD adapters;
-                // a stateful type we have no adapter for must not be rebuilt (state would be lost).
-                // Those are teleport-only: same surface type keeps the same prefab -> same object.
-                if (HasUnhandledState(original))
-                { NoteHud(Loc.T("surface")); SuppressVanillaPlaceThisFrame(bc); return; }
-                // Carried-group gate: a variant switch converts the block (floor table ->
-                // wall-mounted table); the stack on top cannot ride that - a conversion once moved
-                // 3 of 4 deps, the 4th detached, and the wall-variant table later cascade-broke
-                // since nothing wall-worthy supported it. With deps the move is teleport-only;
-                // refuse the conversion instead of maiming the group.
-                if (_carryDeps.Count > 0 || _pickupScan != null)
-                { NoteHud(Loc.T("group")); SuppressVanillaPlaceThisFrame(bc); return; }
+                // Variant differs -> RECREATE, if the gates allow it (see RefuseRecreate).
+                if (RefuseRecreate(bc, original)) return;
                 Block nb;
                 try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
                 catch (System.Exception ex)
@@ -372,16 +378,9 @@ namespace PickUpMove
                 // colliders on the host and places via CreateBlockCheat, so short-distance moves
                 // work like they do for devices.
                 {
-                    // same teleport-only gate as the host branch, checked locally to save the round
-                    // trip (the host enforces it authoritatively anyway via refusal relay)
-                    if (!SameVariant(original, item, dps))
-                    {
-                        if (HasUnhandledState(original))
-                        { NoteHud(Loc.T("surface")); SuppressVanillaPlaceThisFrame(bc); return; }
-                        // same carried-group gate as the host branch (see comment there)
-                        if (_carryDeps.Count > 0 || _pickupScan != null)
-                        { NoteHud(Loc.T("group")); SuppressVanillaPlaceThisFrame(bc); return; }
-                    }
+                    // same recreate gates as the host branch, checked locally to save the round
+                    // trip (the host enforces them authoritatively anyway via refusal relay)
+                    if (!SameVariant(original, item, dps) && RefuseRecreate(bc, original)) return;
                     if (player.Network == null) { Warn("client move: no Network."); AbortKeepOriginal(); return; }
                     if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
                     { NoteHud(Loc.T("no_host")); AbortKeepOriginal(); return; }
