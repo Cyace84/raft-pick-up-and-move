@@ -433,12 +433,7 @@ namespace PickUpMove
             Note($"[diag] move '{item.UniqueName}': recv pos={pos.ToString("F3")} euler={rot.ToString("F3")} dps={dps}"
                 + $" -> built pos={nb.transform.localPosition.ToString("F3")} euler={nb.transform.localEulerAngles.ToString("F3")} dps={nb.dpsType}");
 
-            _hostNb = nb; _hostOriginal = original; _hostSlots = slots; _hostText = text; _hostRgd = rgd; _hostPaint = paint;
-            _hostReqSender = req.Sender; _hostReqRecvTime = req.RecvTime;
-            _hostVerifyStart = Time.frameCount; _hostVerifyDeadlineTime = Time.realtimeSinceStartup + 6f;
-            _hostLastLoggedStable = -1;
-            _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
-            _hostVerifying = true;
+            ArmHostVerify(nb, original, slots, text, rgd, paint, req.Sender, req.RecvTime);
             Trace($"client-requested move: verifying nb@{nb.transform.localPosition.ToString("F2")}");
         }
 
@@ -539,6 +534,23 @@ namespace PickUpMove
             _awaitingHostMove = false;
             Note($"[t] client move total {Time.realtimeSinceStartup - _cmSentTime:F2}s (request -> restored)");
             Note("client: host moved it.");
+        }
+
+        // Arm the settle-then-verify poll for a freshly placed block. Both entries - the local
+        // place in ConfirmMove and a client request in HandleMoveRequest - MUST come through here;
+        // a field armed in one copy but not the other is the same bug family as the hand-copied
+        // resets were. sender/recvTime: default/0 for a local move, the requester for a client one.
+        private static void ArmHostVerify(Block nb, Block original, RGD_Slot[] slots, string text, RGD_Block rgd, Paint paint, Steamworks.CSteamID sender, float recvTime)
+        {
+            _hostNb = nb; _hostOriginal = original; _hostSlots = slots;
+            _hostText = text; _hostRgd = rgd; _hostPaint = paint;
+            _hostReqSender = sender; _hostReqRecvTime = recvTime;
+            _hostVerifyStart = Time.frameCount;
+            _hostVerifyDeadlineTime = Time.realtimeSinceStartup + 6f; // wall-clock; slow settlers (recycler ~4s) fit
+            _hostLastLoggedStable = -1;
+            _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null;
+            _pendingDepRestores.Clear();
+            _hostVerifying = true;
         }
 
         // Every exit from a host verify (success, revert, vanish) drops ALL of this state -

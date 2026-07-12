@@ -353,17 +353,7 @@ namespace PickUpMove
                 // until nb settles to IsStable() over a few physics steps (same-frame reads stale -
                 // SyncTransforms wasn't enough; OverlapBox needs real FixedUpdate steps). No removal
                 // happens yet, so no cascade yet. PollHostVerify finishes the swap or undoes it.
-                _hostNb = nb;
-                _hostOriginal = original;
-                _hostSlots = slots;
-                _hostText = _movingText;
-                _hostRgd = _movingRgd;
-                _hostPaint = _movingPaint;
-                _hostVerifyStart = Time.frameCount;
-                _hostVerifyDeadlineTime = Time.realtimeSinceStartup + 6f; // wall-clock; slow settlers (recycler ~4s) fit
-                _hostLastLoggedStable = -1;
-                _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
-                _hostVerifying = true;
+                ArmHostVerify(nb, original, slots, _movingText, _movingRgd, _movingPaint, default, 0f);
                 Trace($"placing nb@{nb.transform.localPosition.ToString("F2")}; verifying support...");
 
                 // leave build mode but KEEP hidden bookkeeping + pending fields for the poll
