@@ -55,8 +55,8 @@ namespace PickUpMove
 
             ["busy"] = new Dictionary<string, string> {
                 ["en"]="Finishing the previous move. Try again in a moment.",
-                ["ru"]="Завершаю предыдущее перемещение. Повторите через мгновение.",
-                ["de"]="Beende die vorherige Bewegung. Versuche es gleich erneut.",
+                ["ru"]="Завершаю предыдущее перемещение. Попробуйте через секунду.",
+                ["de"]="Beende die vorherige Verschiebung. Versuche es gleich erneut.",
                 ["fr"]="Déplacement précédent en cours. Réessayez dans un instant.",
                 ["sv"]="Avslutar den förra flytten. Försök igen om ett ögonblick.",
                 ["it"]="Sto completando lo spostamento precedente. Riprova tra un istante.",
@@ -127,14 +127,14 @@ namespace PickUpMove
                 ["ko"]="호스트에 연결할 수 없습니다. 원래 자리에 두었습니다.", ["pl"]="Nie udało się połączyć z hostem. Pozostawiono na miejscu." },
 
             ["working"] = new Dictionary<string, string> {
-                ["en"]="Still working on it…", ["ru"]="Ещё обрабатываю…", ["de"]="Wird noch bearbeitet…",
+                ["en"]="Still working on it…", ["ru"]="Ещё работаю…", ["de"]="Wird noch bearbeitet…",
                 ["fr"]="Traitement en cours…", ["sv"]="Arbetar fortfarande på det…",
                 ["it"]="Ci sto ancora lavorando…", ["pt"]="Ainda processando…",
                 ["zh"]="仍在处理中…", ["ja"]="処理中です…", ["ko"]="아직 처리 중입니다…", ["pl"]="Wciąż przetwarzam…" },
 
             ["no_support"] = new Dictionary<string, string> {
                 ["en"]="That spot has no support. Left where it was.",
-                ["ru"]="В этом месте нет опоры. Оставлено на месте.",
+                ["ru"]="Здесь нет опоры. Оставлено на месте.",
                 ["de"]="An dieser Stelle gibt es keinen Halt. Bleibt, wo es war.",
                 ["fr"]="Cet endroit n'a aucun support. Laissé sur place.",
                 ["sv"]="Platsen saknar stöd. Lämnades där det var.",
@@ -194,7 +194,7 @@ namespace PickUpMove
 
             ["r_not_ready"] = new Dictionary<string, string> {
                 ["en"]="The host isn't ready. Try again in a moment.",
-                ["ru"]="Хост не готов. Повторите через мгновение.",
+                ["ru"]="Хост не готов. Попробуйте через секунду.",
                 ["de"]="Der Host ist nicht bereit. Versuche es gleich erneut.",
                 ["fr"]="L'hôte n'est pas prêt. Réessayez dans un instant.",
                 ["sv"]="Värden är inte redo. Försök igen om ett ögonblick.",
