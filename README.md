@@ -23,7 +23,8 @@ it one tile over.
 Two hard exceptions: the detail plank (its stretch mechanic doesn't survive a move) and a
 zipline with a rope attached. Detach the rope first; the mod says so in-game. If a specific
 move would lose device state (say, a filled container onto a different surface type), the mod
-refuses with an on-screen note rather than risk it. Notes are localized (11 languages).
+refuses with an on-screen note rather than risk it. Notes show up in your game's language;
+most translations are machine-made, so corrections are welcome.
 Nothing is ever silently dropped.
 
 ## Install
