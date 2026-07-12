@@ -1,6 +1,6 @@
 # Pick Up & Move
 
-A Raft mod for repositioning things you've already built. Aim at a placed object, press a key, and
+A Raft mod that lets you move things you've already built. Aim at a placed object, press a key, and
 the normal build ghost follows your cursor until you click to set it back down, with its contents
 and state intact.
 
@@ -10,20 +10,20 @@ it one tile over.
 
 ## What it moves (keeping state)
 
-- **Storage:** small, medium, large, wall cabinets. Items stay inside.
-- **Cooking:** cooking pot, grill, juicer, smelter, purifier. Recipe, progress and slots survive.
-- **Crop plots, scarecrows, beehives:** plants, integrity and combs survive.
-- **Battery chargers, biofuel refiners, fuel tanks:** batteries, fuel and contents stay in.
-- **Pipes:** the network rewires itself around the new spot.
-- **Signs / plaques:** keeps the written text.
-- **Decor, furniture, plain placeables.** Items standing on top are carried along. The placement
-  ghost previews the whole group (and live contents like batteries), tinted vanilla green/red.
-  Paint survives.
+- Storage (small, medium, large, wall cabinets), items still inside.
+- Cooking pot, grill, juicer, smelter, purifier: recipe, progress and slots survive.
+- Crop plots, scarecrows, beehives: plants, integrity, combs all make the trip.
+- Battery chargers, biofuel refiners and fuel tanks keep whatever's in them.
+- Pipes rewire themselves around the new spot.
+- Signs and plaques keep their text.
+- Decor, furniture, plain placeables. Anything standing on top is carried along, and the
+  placement ghost previews the whole group (live contents like batteries included), tinted
+  vanilla green/red. Paint survives.
 
-Two hard exceptions: the **detail plank** (its stretch mechanic doesn't survive a move) and a
-**zipline with a rope attached**. Detach the rope first (the mod says so in-game). If a specific
-move would lose device state (e.g. a filled container onto a different surface type), the mod
-**refuses with an on-screen note** rather than risk it. Notes are localized (11 languages).
+Two hard exceptions: the detail plank (its stretch mechanic doesn't survive a move) and a
+zipline with a rope attached. Detach the rope first; the mod says so in-game. If a specific
+move would lose device state (say, a filled container onto a different surface type), the mod
+refuses with an on-screen note rather than risk it. Notes are localized (11 languages).
 Nothing is ever silently dropped.
 
 ## Install
@@ -45,7 +45,7 @@ Change the key in `BepInEx/config/com.cyace84.pickupmove.cfg`.
 Works in co-op, as host or as a client. Anyone with the mod can move things. To *see* a move
 happen live, a player needs the mod too: moves travel over the mod's own channel, so a modless
 peer won't see the object shift until they rejoin (the new position is saved, so it's correct
-after a reload). For a clean co-op experience, everyone should run the mod.
+after a reload). For a clean co-op game, have everyone run the mod.
 
 ## Build from source
 
