@@ -16,15 +16,15 @@ namespace PickUpMove
         // can be re-placed by the same rigid base->base' offset (the whole stack moves as one body).
         private sealed class Carried
         {
-            public Item_Base item;
-            public DPS dps;
-            public RGD_Slot[] slots;
-            public string text;
-            public RGD_Block rgd;
-            public Paint paint;
-            public Block original;
-            public Vector3 localPos;     // position in the base block's local frame (raft-local)
-            public Quaternion localRot;  // rotation relative to the base block (raft-local)
+            public Item_Base Item;
+            public DPS Dps;
+            public RGD_Slot[] Slots;
+            public string Text;
+            public RGD_Block Rgd;
+            public Paint Paint;
+            public Block Original;
+            public Vector3 LocalPos;     // position in the base block's local frame (raft-local)
+            public Quaternion LocalRot;  // rotation relative to the base block (raft-local)
         }
 
         private static readonly List<Block> _depOriginals = new List<Block>();
@@ -39,18 +39,18 @@ namespace PickUpMove
             var s = (b is Storage_Small ss && ss.GetInventoryReference() != null) ? ss.GetInventoryReference().GetRGDSlots() : null;
             return new Carried
             {
-                item = b.buildableItem,
-                dps = b.dpsType,
-                slots = s,
-                text = TryGetSignText(b),
-                rgd = TryCaptureRgd(b),
-                paint = CapturePaint(b),
-                original = b,
+                Item = b.buildableItem,
+                Dps = b.dpsType,
+                Slots = s,
+                Text = TryGetSignText(b),
+                Rgd = TryCaptureRgd(b),
+                Paint = CapturePaint(b),
+                Original = b,
                 // express the piece RELATIVE to the base block in raft-local space, so re-placing it by
                 // the base's new local pos/rot moves the whole stack as one rigid body (CreateBlockCheat
                 // takes raft-local position + euler, like ghost.localPosition/localEulerAngles).
-                localPos = Quaternion.Inverse(relativeTo.transform.localRotation) * (b.transform.localPosition - relativeTo.transform.localPosition),
-                localRot = Quaternion.Inverse(relativeTo.transform.localRotation) * b.transform.localRotation,
+                LocalPos = Quaternion.Inverse(relativeTo.transform.localRotation) * (b.transform.localPosition - relativeTo.transform.localPosition),
+                LocalRot = Quaternion.Inverse(relativeTo.transform.localRotation) * b.transform.localRotation,
             };
         }
 
@@ -86,7 +86,7 @@ namespace PickUpMove
                     foreach (var pb in BlockCreator.GetPlacedBlocks())
                     {
                         if (pb == null || pb == original || pb == nb || frontier.Contains(pb)) continue;
-                        if (captured.Exists(c => c.original == pb)) continue;
+                        if (captured.Exists(c => c.Original == pb)) continue;
                         if (Vector3.Distance(pb.transform.position, hb.transform.position) > dist) continue;
                         if (pb.IsStable()) continue;                       // still supported elsewhere - not ours
                         var pbi = pb.buildableItem;
@@ -125,19 +125,19 @@ namespace PickUpMove
 
                 foreach (var c in captured)
                 {
-                    var localPos = nb.transform.localPosition + nb.transform.localRotation * c.localPos;
-                    var localEuler = (nb.transform.localRotation * c.localRot).eulerAngles;
+                    var localPos = nb.transform.localPosition + nb.transform.localRotation * c.LocalPos;
+                    var localEuler = (nb.transform.localRotation * c.LocalRot).eulerAngles;
                     Block nd;
-                    try { nd = bc.CreateBlockCheat(c.item, localPos, localEuler, c.dps, -1); }
+                    try { nd = bc.CreateBlockCheat(c.Item, localPos, localEuler, c.Dps, -1); }
                     catch (System.Exception ex) { failMsg = "Didn't move the stack: " + ex.Message; return false; }
                     if (nd == null) { failMsg = "Didn't move the stack - couldn't recreate a piece on top."; return false; }
                     _newDependents.Add(nd);
-                    ApplyState(nd, c.slots, c.rgd, c.paint, c.text, player);
+                    ApplyState(nd, c.Slots, c.Rgd, c.Paint, c.Text, player);
                     // dep storages join the read-back verification queue (storage restore gate);
                     // PollHostVerify won't remove ANY original until every entry verifies.
-                    if (nd is Storage_Small && c.slots != null)
-                        _pendingDepRestores.Add(new DepRestore { Nd = nd, Slots = c.slots });
-                    _depOriginals.Add(c.original);
+                    if (nd is Storage_Small && c.Slots != null)
+                        _pendingDepRestores.Add(new DepRestore { Nd = nd, Slots = c.Slots });
+                    _depOriginals.Add(c.Original);
                 }
                 _depMovedCount = captured.Count;
                 return true;

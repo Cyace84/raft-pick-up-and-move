@@ -49,7 +49,7 @@ namespace PickUpMove
                 _hudNote = null;
                 try { if (_hudLabel != null) _hudLabel.gameObject.SetActive(false); } catch { }
             }
-            if (moving != null || _hostVerifying) { ClearHintIfShown(); return; }
+            if (Moving != null || _hostVerifying) { ClearHintIfShown(); return; }
             UpdateMoveHint();
         }
         private static void UpdateMoveHint()
@@ -132,7 +132,7 @@ namespace PickUpMove
         {
             try
             {
-                if (Plugin.moving != null) return;                       // already carrying one
+                if (Plugin.Moving != null) return;                       // already carrying one
                 if (CanvasHelper.ActiveMenu != MenuType.None) return;    // a menu is open
                 if (__instance == null || __instance.IsOpen) return;    // chest is open
                 var dtm = ComponentManager<DisplayTextManager>.Value;

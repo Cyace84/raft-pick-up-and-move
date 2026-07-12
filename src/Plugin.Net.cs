@@ -339,7 +339,7 @@ namespace PickUpMove
             }
             catch (System.Exception ex) { Warn("move req poll: " + ex.Message); }
 
-            while (!_hostVerifying && !_tpVerifying && _reqScan == null && moving == null && _moveReqQueue.Count > 0)
+            while (!_hostVerifying && !_tpVerifying && _reqScan == null && Moving == null && _moveReqQueue.Count > 0)
             {
                 var req = _moveReqQueue.Dequeue();
                 uint reqIdx = 0;
@@ -348,7 +348,7 @@ namespace PickUpMove
                 HandleMoveRequest(req);
                 break;
             }
-            if ((_hostVerifying || moving != null) && _moveReqQueue.Count > 0 && Time.frameCount % 300 == 0)
+            if ((_hostVerifying || Moving != null) && _moveReqQueue.Count > 0 && Time.frameCount % 300 == 0)
                 Note($"[t] {_moveReqQueue.Count} move request(s) queued behind the current move");
         }
 
@@ -541,14 +541,23 @@ namespace PickUpMove
             Note("client: host moved it.");
         }
 
+        // Every exit from a host verify (success, revert, vanish) drops ALL of this state -
+        // a field that survives here leaks into the next move's verify.
+        private static void ResetHostVerify()
+        {
+            _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null;
+            _hostText = null; _hostRgd = null; _hostPaint = default; _hostReqSender = default;
+            _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null;
+            _pendingDepRestores.Clear();
+        }
+
         private static void PollHostVerify()
         {
             if (_hostNb == null)
             {
                 RestoreHidden();
                 if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "r_move_failed");
-                _hostVerifying = false; _hostOriginal = null; _hostSlots = null; _hostReqSender = default;
-                _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
+                ResetHostVerify();
                 Warn("host verify: placed chest vanished before settling; original restored, nothing lost.");
                 return;
             }
@@ -609,8 +618,7 @@ namespace PickUpMove
                         RestoreHidden();
                         Note(depFail);
                         if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, depFail);
-                        _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
-                        _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
+                        ResetHostVerify();
                         return;
                     }
                     _hostDepsMoved = true;
@@ -639,8 +647,7 @@ namespace PickUpMove
                         try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
                         RestoreHidden();
                         if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, "r_move_failed");
-                        _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
-                        _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
+                        ResetHostVerify();
                         return;
                     }
                     foreach (var pr in _pendingDepRestores)
@@ -669,8 +676,7 @@ namespace PickUpMove
                     + (restored > 0 ? $"; restored {restored} slots" : "")
                     + (_depMovedCount > 0 ? $"; moved {_depMovedCount} on top" : ""));
                 if (_hostReqSender.IsValid()) Note($"[t] client move total {Time.realtimeSinceStartup - _hostReqRecvTime:F2}s (recv -> original removed)");
-                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
-                _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null;
+                ResetHostVerify();
                 return;
                 }
             }
@@ -684,8 +690,7 @@ namespace PickUpMove
                 LogStability(_hostNb); // which gizmo cell(s) never found support
                 Note("host place fail at +" + delta + "f"); NoteHud(Loc.T("no_support"));
                 if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "no_support");
-                _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null; _hostText = null; _hostRgd = null; _hostReqSender = default;
-                _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null; _pendingDepRestores.Clear();
+                ResetHostVerify();
             }
         }
     }

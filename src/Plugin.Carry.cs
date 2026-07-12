@@ -11,21 +11,21 @@ namespace PickUpMove
     // Carry pipeline: pick up, cancel, confirm placement, build-mode enter/exit.
     public partial class Plugin
     {
-        // carry-mode state. `moving` is the block being carried (any Placeable block, not just storage).
-        internal static Block moving;
-        internal static Item_Base movingItem;
-        internal static DPS movingDps;
-        internal static RGD_Slot[] movingSlots;
+        // carry-mode state. `Moving` is the block being carried (any Placeable block, not just storage).
+        internal static Block Moving;
+        private static Item_Base _movingItem;
+        private static DPS _movingDps;
+        private static RGD_Slot[] _movingSlots;
         // paint carried with the chest (SO_ColorValue refs + pattern indices); see Paint/CapturePaint
-        private static Paint movingPaint;
+        private static Paint _movingPaint;
         // deep per-type state carried beyond paint/contents: sign/plaque text (null unless the block
         // is a TextWriterObject). Restored via the game's own networked setter so it survives + syncs.
-        private static string movingText;
+        private static string _movingText;
         // the block's full save snapshot, captured at pickup. Many device RGD subtypes override
         // RestoreBlock (purifier tank+battery, cooking progress, fuel tank, wind turbine) - calling it
         // on the recreated block re-applies that state for FREE (the game's own load path). Null/base
         // = just paint+health.
-        private static RGD_Block movingRgd;
+        private static RGD_Block _movingRgd;
 
         // renderers/colliders we disabled to hide the original while carrying (restored on cancel)
         private static readonly List<Collider> _hiddenColliders = new List<Collider>();
@@ -80,14 +80,14 @@ namespace PickUpMove
             // decor on it (a table) can drop that decor. Revisit with a real support-graph query.
 
             // storage contents: only storages carry an inventory; other placeables carry no slots.
-            movingSlots = (block is Storage_Small storage && storage.GetInventoryReference() != null)
+            _movingSlots = (block is Storage_Small storage && storage.GetInventoryReference() != null)
                 ? storage.GetInventoryReference().GetRGDSlots() : null;
-            movingItem = block.buildableItem;
-            movingDps = block.dpsType;
-            movingPaint = CapturePaint(block);
-            movingText = TryGetSignText(block);
-            movingRgd = TryCaptureRgd(block);
-            moving = block;
+            _movingItem = block.buildableItem;
+            _movingDps = block.dpsType;
+            _movingPaint = CapturePaint(block);
+            _movingText = TryGetSignText(block);
+            _movingRgd = TryCaptureRgd(block);
+            Moving = block;
             ClearHintIfShown(); // leaving idle -> drop our hint; build-mode UI takes over
 
             // Hide the original while carrying so its mesh+collider don't block placing the
@@ -121,24 +121,24 @@ namespace PickUpMove
             var bc = player.BlockCreator;
             _bcWasInactive = bc != null && !bc.gameObject.activeSelf;
             if (_bcWasInactive) bc.gameObject.SetActive(true);
-            bc?.SetBlockTypeToBuild(movingItem);
+            bc?.SetBlockTypeToBuild(_movingItem);
 
-            Note($"Carrying '{movingItem.UniqueName}'" + ((movingSlots?.Length ?? 0) > 0 ? $" ({movingSlots.Length} slots)" : "") + ". LMB to place.");
+            Note($"Carrying '{_movingItem.UniqueName}'" + ((_movingSlots?.Length ?? 0) > 0 ? $" ({_movingSlots.Length} slots)" : "") + ". LMB to place.");
         }
 
         internal static void CancelMove()
         {
-            if (moving == null) return;
+            if (Moving == null) return;
             if (_pickupScan != null) FinishDepScan(_pickupScan, abort: true);
             _carryDeps.Clear();
             // restore the hidden original
             RestoreHidden();
             ExitBuildMode();
-            moving = null;
-            movingItem = null;
-            movingSlots = null;
-            movingText = null;
-            movingRgd = null;
+            Moving = null;
+            _movingItem = null;
+            _movingSlots = null;
+            _movingText = null;
+            _movingRgd = null;
         }
 
         // Hide a block's visuals during carry: Renderers AND Canvases (a Reciever's radar screen is a
@@ -204,11 +204,11 @@ namespace PickUpMove
         // this, so there is nothing to restore.
         private static void ClearCarry()
         {
-            moving = null;
-            movingItem = null;
-            movingSlots = null;
-            movingText = null;
-            movingRgd = null;
+            Moving = null;
+            _movingItem = null;
+            _movingSlots = null;
+            _movingText = null;
+            _movingRgd = null;
             ExitBuildMode();
         }
 
@@ -279,7 +279,7 @@ namespace PickUpMove
 
             var pos = ghost.transform.localPosition;
             var rot = ghost.transform.localEulerAngles;
-            var item = movingItem;
+            var item = _movingItem;
             // CRITICAL: use the GHOST's surface-matched DPS (Wall/Floor/Ceiling), NOT the original's
             // stored dps. settings_buildable.GetBlockPrefab(dpsType) picks a DIFFERENT prefab per
             // surface (Placeable_Storage_*_Wall has a holder + a wall-facing stability gizmo;
@@ -287,8 +287,8 @@ namespace PickUpMove
             // gizmo that never finds support => IsStable() false forever. The ghost already resolved
             // the correct variant (that's why ghostStable=True), so mirror it.
             var dps = ghost.dpsType;
-            var slots = movingSlots;
-            var original = moving;
+            var slots = _movingSlots;
+            var original = Moving;
             var player = ComponentManager<Network_Player>.Value;
             if (player == null) { Trace("place: no local player."); return; }
 
@@ -316,7 +316,7 @@ namespace PickUpMove
                 {
                     BeginTeleport(original, pos, rot, default, _carryDeps);
                     _carryDeps.Clear();
-                    moving = null; movingItem = null; movingSlots = null;
+                    Moving = null; _movingItem = null; _movingSlots = null;
                     RestoreHidden();
                     ExitBuildMode();
                     return;
@@ -356,9 +356,9 @@ namespace PickUpMove
                 _hostNb = nb;
                 _hostOriginal = original;
                 _hostSlots = slots;
-                _hostText = movingText;
-                _hostRgd = movingRgd;
-                _hostPaint = movingPaint;
+                _hostText = _movingText;
+                _hostRgd = _movingRgd;
+                _hostPaint = _movingPaint;
                 _hostVerifyStart = Time.frameCount;
                 _hostVerifyDeadlineTime = Time.realtimeSinceStartup + 6f; // wall-clock; slow settlers (recycler ~4s) fit
                 _hostLastLoggedStable = -1;
@@ -367,9 +367,9 @@ namespace PickUpMove
                 Trace($"placing nb@{nb.transform.localPosition.ToString("F2")}; verifying support...");
 
                 // leave build mode but KEEP hidden bookkeeping + pending fields for the poll
-                moving = null;
-                movingItem = null;
-                movingSlots = null;
+                Moving = null;
+                _movingItem = null;
+                _movingSlots = null;
                 ExitBuildMode();
             }
             else
@@ -399,8 +399,8 @@ namespace PickUpMove
                     _cmAcked = false; _cmProbeSent = false;
                     // remember our captured state + snapshot existing blocks so we can find the new one
                     // and restore it on our own view (host's restore doesn't replicate device state back).
-                    _clientMoveRgd = movingRgd; _clientMoveSlots = movingSlots;
-                    _clientMovePaint = movingPaint; _clientMoveText = movingText;
+                    _clientMoveRgd = _movingRgd; _clientMoveSlots = _movingSlots;
+                    _clientMovePaint = _movingPaint; _clientMoveText = _movingText;
                     _clientMovePos = pos; _clientMoveRestored = false;
                     _preExisting.Clear();
                     foreach (var b in BlockCreator.GetPlacedBlocks()) if (b != null) _preExisting.Add(b.ObjectIndex);
@@ -408,7 +408,7 @@ namespace PickUpMove
                     _awaitingHostMove = true;
                     _clientMoveDeadlineFrame = Time.frameCount + 600; // ~10s failsafe
                     Note($"client: asked host to move '{item.UniqueName}'; original kept until the host confirms.");
-                    moving = null; movingItem = null; movingSlots = null; ExitBuildMode();
+                    Moving = null; _movingItem = null; _movingSlots = null; ExitBuildMode();
                     return;
                 }
 

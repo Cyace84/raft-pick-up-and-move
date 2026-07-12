@@ -114,7 +114,7 @@ namespace PickUpMove
             try { Harmony.UnpatchID(Guid); } catch { }
             // Destroy EVERY ticker we (or an older hot-reloaded copy) ever spawned. The ticker is
             // HideAndDontSave, which FindObjectsOfType misses - Resources.FindObjectsOfTypeAll sees it.
-            // Without this, stacked reloads leave multiple tickers, each with its own `moving` static,
+            // Without this, stacked reloads leave multiple tickers, each with its own `Moving` static,
             // fighting over the hotkey (the cause of flaky cancel). Belt-and-suspenders over _tickerGo.
             try
             {
@@ -123,7 +123,7 @@ namespace PickUpMove
             }
             catch { }
             _tickerGo = null;
-            moving = null; movingItem = null; movingSlots = null;
+            Moving = null; _movingItem = null; _movingSlots = null;
             _hostVerifying = false;
             _pickupScan = null; _reqScan = null; _carryDeps.Clear();
         }
@@ -178,7 +178,7 @@ namespace PickUpMove
 
             if (MoveKey.Value.IsDown())
             {
-                if (moving != null) CancelMove();
+                if (Moving != null) CancelMove();
                 // Don't start a new move while the previous one is still resolving: the hide-bookkeeping
                 // (_hidden* lists) and the single pending-original fields are shared, so overlapping moves
                 // corrupt them - the prior original loses its restore info (stays invisible on the client)
@@ -190,13 +190,13 @@ namespace PickUpMove
                 return;
             }
 
-            if (moving == null) { _rearmBuild = false; return; }
+            if (Moving == null) { _rearmBuild = false; return; }
 
             // re-arm the ghost a refusal suppressed last frame (carry continues, see SuppressVanillaPlaceThisFrame)
             if (_rearmBuild)
             {
                 _rearmBuild = false;
-                ComponentManager<Network_Player>.Value?.BlockCreator?.SetBlockTypeToBuild(movingItem);
+                ComponentManager<Network_Player>.Value?.BlockCreator?.SetBlockTypeToBuild(_movingItem);
             }
 
             // carrying: right-click cancels, left-click confirms placement at the ghost
@@ -213,7 +213,7 @@ namespace PickUpMove
     }
 
     // Our own guaranteed per-frame ticker, independent of BaseUnityPlugin.Update, surviving scene loads.
-    public class Ticker : MonoBehaviour
+    public sealed class Ticker : MonoBehaviour
     {
         private void Update() => Plugin.Tick();
         private void LateUpdate() => Plugin.LateTick();

@@ -76,7 +76,7 @@ namespace PickUpMove
         {
             if (_ghostPreviews.Count == 0) return;
             Block ghost = null;
-            if (moving != null)
+            if (Moving != null)
                 try { ghost = ComponentManager<Network_Player>.Value?.BlockCreator?.selectedBlock; } catch { }
             bool show = ghost != null && ghost.gameObject.activeInHierarchy;
             // Red/green state of the ghost. Vanilla's MaterialRendConnection.SetMaterial (decompile)
