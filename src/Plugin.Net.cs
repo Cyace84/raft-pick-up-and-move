@@ -563,16 +563,32 @@ namespace PickUpMove
             RestoreHidden();
         }
 
+        // The placed block disappeared before settling (removed by the game, another peer, a
+        // cascade). Revert everything; the original was never touched.
+        private static void HostVerifyVanished()
+        {
+            UndoHostMove(null); // also discards any dependents already re-created this verify
+            if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "r_move_failed");
+            ResetHostVerify();
+            Warn("host verify: placed chest vanished before settling; original restored, nothing lost.");
+        }
+
+        // Deadline hit while the placed block still (or again) reads unstable: remove it, restore
+        // the original, tell the requesting client why.
+        private static void HostVerifyDeadline(int delta)
+        {
+            // UndoHostMove also discards dependents: reachable when the block settled, deps were
+            // re-created, and THEN it lost support - the old code left those copies standing.
+            UndoHostMove(_hostNb);
+            LogStability(_hostNb); // which gizmo cell(s) never found support
+            Note("host place fail at +" + delta + "f"); NoteHud(Loc.T("no_support"));
+            if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "no_support");
+            ResetHostVerify();
+        }
+
         private static void PollHostVerify()
         {
-            if (_hostNb == null)
-            {
-                UndoHostMove(null); // also discards any dependents already re-created this verify
-                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "r_move_failed");
-                ResetHostVerify();
-                Warn("host verify: placed chest vanished before settling; original restored, nothing lost.");
-                return;
-            }
+            if (_hostNb == null) { HostVerifyVanished(); return; }
 
             int delta = Time.frameCount - _hostVerifyStart;
             bool stable = false;
@@ -683,16 +699,7 @@ namespace PickUpMove
                 }
             }
 
-            if (Time.realtimeSinceStartup > _hostVerifyDeadlineTime)
-            {
-                // UndoHostMove also discards dependents: reachable when the block settled, deps were
-                // re-created, and THEN it lost support - the old code left those copies standing.
-                UndoHostMove(_hostNb);
-                LogStability(_hostNb); // which gizmo cell(s) never found support
-                Note("host place fail at +" + delta + "f"); NoteHud(Loc.T("no_support"));
-                if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, _hostOriginal != null ? _hostOriginal.ObjectIndex : 0u, "no_support");
-                ResetHostVerify();
-            }
+            if (Time.realtimeSinceStartup > _hostVerifyDeadlineTime) HostVerifyDeadline(delta);
         }
     }
 }
