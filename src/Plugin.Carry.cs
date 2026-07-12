@@ -316,92 +316,92 @@ namespace PickUpMove
             // stable on its own; a stable block can't be cascaded. If the spot is unsupported (a wall
             // with no holder, an edge, clipping) the new chest is !IsStable() -> we discard it and KEEP
             // the original, so nothing is ever lost.
-            if (Raft_Network.IsHost)
+            if (Raft_Network.IsHost) ConfirmMoveHost(bc, original, item, dps, pos, rot, slots);
+            else ConfirmMoveClient(bc, original, item, dps, pos, rot, player);
+        }
+
+        private static void ConfirmMoveHost(BlockCreator bc, Block original, Item_Base item, DPS dps, Vector3 pos, Vector3 rot, RGD_Slot[] slots)
+        {
+            // Same prefab variant -> teleport the existing block: nothing recreated, nothing
+            // removed, no state to carry, no replication lifecycle to lose. Variant identity is
+            // compared by prefab NAME (instances are 'PrefabName(Clone)') - the dpsType enum on
+            // a variant prefab does not reliably equal the surface we send, names are truth by
+            // construction. The stack found by the pickup dep-scan (_carryDeps) teleports along;
+            // RestoreHidden un-hides the SAME object at its new spot.
+            // Block_Pipe (segments AND devices - the charger IS Block_Pipe) teleports too:
+            // BeginTeleport replays the autotile lifecycle around the move (see PipeLifecycle).
+            // A blanket 'pipes always recreate' exclusion would lock stateful pipe devices out
+            // entirely (stateful -> recreate refused -> 'surface' forever).
+            if (SameVariant(original, item, dps))
             {
-                // Same prefab variant -> teleport the existing block: nothing recreated, nothing
-                // removed, no state to carry, no replication lifecycle to lose. Variant identity is
-                // compared by prefab NAME (instances are 'PrefabName(Clone)') - the dpsType enum on
-                // a variant prefab does not reliably equal the surface we send, names are truth by
-                // construction. The stack found by the pickup dep-scan (_carryDeps) teleports along;
-                // RestoreHidden un-hides the SAME object at its new spot.
-                // Block_Pipe (segments AND devices - the charger IS Block_Pipe) teleports too:
-                // BeginTeleport replays the autotile lifecycle around the move (see PipeLifecycle).
-                // A blanket 'pipes always recreate' exclusion would lock stateful pipe devices out
-                // entirely (stateful -> recreate refused -> 'surface' forever).
-                if (SameVariant(original, item, dps))
-                {
-                    BeginTeleport(original, pos, rot, default, _carryDeps);
-                    _carryDeps.Clear();
-                    Moving = null; _movingItem = null; _movingSlots = null;
-                    RestoreHidden();
-                    ExitBuildMode();
-                    return;
-                }
-                // Variant differs -> RECREATE, if the gates allow it (see RefuseRecreate).
-                if (RefuseRecreate(bc, original)) return;
-                Block nb;
-                try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
-                catch (System.Exception ex)
-                {
-                    Warn("place failed (CreateBlockCheat threw): " + ex.Message + "; chest left where it was.");
-                    AbortKeepOriginal();
-                    return;
-                }
-
-                if (nb == null)
-                {
-                    Warn("place produced no block; original left where it was.");
-                    AbortKeepOriginal();
-                    return;
-                }
-
-                // place-first + DEFERRED stability gate: nb exists, but the original stays hidden
-                // until nb settles to IsStable() over a few physics steps (same-frame reads stale -
-                // SyncTransforms wasn't enough; OverlapBox needs real FixedUpdate steps). No removal
-                // happens yet, so no cascade yet. PollHostVerify finishes the swap or undoes it.
-                ArmHostVerify(nb, original, slots, _movingText, _movingRgd, _movingPaint, default, 0f);
-                Trace($"placing nb@{nb.transform.localPosition.ToString("F2")}; verifying support...");
-
-                // leave build mode but KEEP hidden bookkeeping + pending fields for the poll
-                Moving = null;
-                _movingItem = null;
-                _movingSlots = null;
+                BeginTeleport(original, pos, rot, default, _carryDeps);
+                _carryDeps.Clear();
+                Moving = null; _movingItem = null; _movingSlots = null;
+                RestoreHidden();
                 ExitBuildMode();
+                return;
             }
-            else
+            // Variant differs -> RECREATE, if the gates allow it (see RefuseRecreate).
+            if (RefuseRecreate(bc, original)) return;
+            Block nb;
+            try { nb = bc.CreateBlockCheat(item, pos, rot, dps, -1); }
+            catch (System.Exception ex)
             {
-                // CLIENT: hand the whole move to the HOST (both run the mod) - storages included.
-                // The vanilla place-request path (Message_BlockCreator_PlaceBlock) is no good here:
-                // the host validates that placement against the ORIGINAL chest still standing there
-                // with colliders on, so any move shorter than the chest's own footprint is silently
-                // rejected -> timeout -> "snap back". The move-request path hides the original's
-                // colliders on the host and places via CreateBlockCheat, so short-distance moves
-                // work like they do for devices.
-                {
-                    // same recreate gates as the host branch, checked locally to save the round
-                    // trip (the host enforces them authoritatively anyway via refusal relay)
-                    if (!SameVariant(original, item, dps) && RefuseRecreate(bc, original)) return;
-                    if (player.Network == null) { Warn("client move: no Network."); AbortKeepOriginal(); return; }
-                    if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
-                    { NoteHud(Loc.T("no_host")); AbortKeepOriginal(); return; }
-                    _cmSentTime = Time.realtimeSinceStartup; _cmOrigGoneLogged = false; _cmSeenLogged = false;
-                    _cmAcked = false; _cmProbeSent = false;
-                    // remember our captured state + snapshot existing blocks so we can find the new one
-                    // and restore it on our own view (host's restore doesn't replicate device state back).
-                    _clientMoveRgd = _movingRgd; _clientMoveSlots = _movingSlots;
-                    _clientMovePaint = _movingPaint; _clientMoveText = _movingText;
-                    _clientMovePos = pos; _clientMoveRestored = false;
-                    _preExisting.Clear();
-                    foreach (var b in BlockCreator.GetPlacedBlocks()) if (b != null) _preExisting.Add(b.ObjectIndex);
-                    _pendingClientMoveOriginal = original;
-                    _awaitingHostMove = true;
-                    _clientMoveDeadlineFrame = Time.frameCount + 600; // ~10s failsafe
-                    Note($"client: asked host to move '{item.UniqueName}'; original kept until the host confirms.");
-                    Moving = null; _movingItem = null; _movingSlots = null; ExitBuildMode();
-                    return;
-                }
-
+                Warn("place failed (CreateBlockCheat threw): " + ex.Message + "; chest left where it was.");
+                AbortKeepOriginal();
+                return;
             }
+
+            if (nb == null)
+            {
+                Warn("place produced no block; original left where it was.");
+                AbortKeepOriginal();
+                return;
+            }
+
+            // place-first + DEFERRED stability gate: nb exists, but the original stays hidden
+            // until nb settles to IsStable() over a few physics steps (same-frame reads stale -
+            // SyncTransforms wasn't enough; OverlapBox needs real FixedUpdate steps). No removal
+            // happens yet, so no cascade yet. PollHostVerify finishes the swap or undoes it.
+            ArmHostVerify(nb, original, slots, _movingText, _movingRgd, _movingPaint, default, 0f);
+            Trace($"placing nb@{nb.transform.localPosition.ToString("F2")}; verifying support...");
+
+            // leave build mode but KEEP hidden bookkeeping + pending fields for the poll
+            Moving = null;
+            _movingItem = null;
+            _movingSlots = null;
+            ExitBuildMode();
+        }
+
+        // CLIENT: hand the whole move to the HOST (both run the mod) - storages included.
+        // The vanilla place-request path (Message_BlockCreator_PlaceBlock) is no good here:
+        // the host validates that placement against the ORIGINAL chest still standing there
+        // with colliders on, so any move shorter than the chest's own footprint is silently
+        // rejected -> timeout -> "snap back". The move-request path hides the original's
+        // colliders on the host and places via CreateBlockCheat, so short-distance moves
+        // work like they do for devices.
+        private static void ConfirmMoveClient(BlockCreator bc, Block original, Item_Base item, DPS dps, Vector3 pos, Vector3 rot, Network_Player player)
+        {
+            // same recreate gates as the host branch, checked locally to save the round
+            // trip (the host enforces them authoritatively anyway via refusal relay)
+            if (!SameVariant(original, item, dps) && RefuseRecreate(bc, original)) return;
+            if (player.Network == null) { Warn("client move: no Network."); AbortKeepOriginal(); return; }
+            if (!SendMoveRequest(player, original.ObjectIndex, pos, rot, dps))
+            { NoteHud(Loc.T("no_host")); AbortKeepOriginal(); return; }
+            _cmSentTime = Time.realtimeSinceStartup; _cmOrigGoneLogged = false; _cmSeenLogged = false;
+            _cmAcked = false; _cmProbeSent = false;
+            // remember our captured state + snapshot existing blocks so we can find the new one
+            // and restore it on our own view (host's restore doesn't replicate device state back).
+            _clientMoveRgd = _movingRgd; _clientMoveSlots = _movingSlots;
+            _clientMovePaint = _movingPaint; _clientMoveText = _movingText;
+            _clientMovePos = pos; _clientMoveRestored = false;
+            _preExisting.Clear();
+            foreach (var b in BlockCreator.GetPlacedBlocks()) if (b != null) _preExisting.Add(b.ObjectIndex);
+            _pendingClientMoveOriginal = original;
+            _awaitingHostMove = true;
+            _clientMoveDeadlineFrame = Time.frameCount + 600; // ~10s failsafe
+            Note($"client: asked host to move '{item.UniqueName}'; original kept until the host confirms.");
+            Moving = null; _movingItem = null; _movingSlots = null; ExitBuildMode();
         }
     }
 }
