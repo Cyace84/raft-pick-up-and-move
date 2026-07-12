@@ -586,6 +586,31 @@ namespace PickUpMove
             ResetHostVerify();
         }
 
+        // Point of no return: every restore verified. Remove the originals (dependents first),
+        // announce moved plants, report, reset.
+        private static void FinishHostMove(Block nb, Block original, RGD_Slot[] slots, Network_Player player, int delta)
+        {
+            _hiddenColliders.Clear();
+            _hiddenRenderers.Clear();
+            _hiddenCanvases.Clear();
+            // remove originals: dependents first (their colliders were disabled during detection),
+            // then the base block - nothing rests on it now, so no cascade victims.
+            foreach (var d in _depOriginals) if (d != null) { DeregisterCropplotPlants(d); try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
+            _depOriginals.Clear(); _depColliderDisabled.Clear(); _newDependents.Clear();
+            if (original != null) { DeregisterCropplotPlants(original); try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
+
+            // originals are gone on every peer (reliable ordered channel) - now announce the moved
+            // plants so clients recreate them through the game's own planting path (harvest-linked).
+            FlushPlantBroadcasts(player);
+
+            int restored = slots?.Length ?? 0;
+            Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"
+                + (restored > 0 ? $"; restored {restored} slots" : "")
+                + (_depMovedCount > 0 ? $"; moved {_depMovedCount} on top" : ""));
+            if (_hostReqSender.IsValid()) Note($"[t] client move total {Time.realtimeSinceStartup - _hostReqRecvTime:F2}s (recv -> original removed)");
+            ResetHostVerify();
+        }
+
         private static void PollHostVerify()
         {
             if (_hostNb == null) { HostVerifyVanished(); return; }
@@ -676,25 +701,7 @@ namespace PickUpMove
                     _pendingDepRestores.Clear();
                 }
 
-                _hiddenColliders.Clear();
-                _hiddenRenderers.Clear();
-                _hiddenCanvases.Clear();
-                // remove originals: dependents first (their colliders were disabled during detection),
-                // then the base block - nothing rests on it now, so no cascade victims.
-                foreach (var d in _depOriginals) if (d != null) { DeregisterCropplotPlants(d); try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
-                _depOriginals.Clear(); _depColliderDisabled.Clear(); _newDependents.Clear();
-                if (original != null) { DeregisterCropplotPlants(original); try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
-
-                // originals are gone on every peer (reliable ordered channel) - now announce the moved
-                // plants so clients recreate them through the game's own planting path (harvest-linked).
-                FlushPlantBroadcasts(player);
-
-                int restored = slots?.Length ?? 0;
-                Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"
-                    + (restored > 0 ? $"; restored {restored} slots" : "")
-                    + (_depMovedCount > 0 ? $"; moved {_depMovedCount} on top" : ""));
-                if (_hostReqSender.IsValid()) Note($"[t] client move total {Time.realtimeSinceStartup - _hostReqRecvTime:F2}s (recv -> original removed)");
-                ResetHostVerify();
+                FinishHostMove(nb, original, slots, player, delta);
                 return;
                 }
             }
