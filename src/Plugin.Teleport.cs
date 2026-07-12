@@ -1,0 +1,228 @@
+using System.Collections.Generic;
+using System.IO;
+using BepInEx;
+using BepInEx.Configuration;
+using BepInEx.Logging;
+using HarmonyLib;
+using UnityEngine;
+
+namespace PickUpMove
+{
+    // Same-variant teleport move: transform-as-state, pipe lifecycle replay, peer notifies.
+    public partial class Plugin
+    {
+        // ---- TELEPORT MOVE (same-surface) ----------------------------------------------------
+        // Move the EXISTING block by setting its transform - nothing is removed or recreated, so no
+        // state can possibly be lost (same ObjectIndex, same inventory, same paint, same plants) and
+        // there is no create/remove replication to lose on a flaky link (the zombie/dupe class dies).
+        // Position is STATE, not an event: the notify packet (type 7) is idempotent and is re-sent a
+        // couple of times; even a total loss self-heals via the probe (which now carries the current
+        // transform). Only a surface change (Floor->Wall = different prefab variant) still uses the
+        // old recreate pipeline. RGD_Block reads block.transform at save time (RGD_Block ctor:300),
+        // so saves are correct; placeables sit in no position-keyed cache (walkable-grid is structure).
+        private static Block _tpBlock;
+        private static Vector3 _tpOldPos, _tpOldRot;
+        private static readonly List<Block> _tpDeps = new List<Block>();
+        private static readonly List<Vector3> _tpDepsOldPos = new List<Vector3>();
+        private static readonly List<Quaternion> _tpDepsOldRot = new List<Quaternion>();
+        private static bool _tpVerifying;
+        private static int _tpVerifyStart;
+        private static float _tpVerifyDeadlineTime;
+        private static Steamworks.CSteamID _tpReqSender;
+        private sealed class TpSend { public Steamworks.CSteamID To; public byte[] Payload; public float Next; public int Left; }
+        private static readonly List<TpSend> _tpSends = new List<TpSend>();
+
+        // Teleport is only legal when the target placement uses the SAME prefab variant as the
+        // existing block (a Floor->Wall move instantiates a different prefab - holder, gizmos - and
+        // must go through the recreate pipeline). Compare by prefab name: the live block is
+        // 'PrefabName(Clone)'; enum dpsType on the variant prefab is not a reliable discriminator
+        // (a wall chest re-placed on the same wall can report a mismatched dps).
+        private static bool SameVariant(Block original, Item_Base item, DPS dps)
+        {
+            try
+            {
+                if (original == null) { Warn("SameVariant: original is null/destroyed -> false"); return false; }
+                var reqPrefab = item?.settings_buildable?.GetBlockPrefab(dps);
+                // reqPrefab == null => the item has no distinct prefab for this dps, i.e. it is a
+                // single-variant placeable (BatteryCharger, most devices: one floor prefab, dpsType
+                // Default/None). GetBlockPrefab is keyed on surface enums it doesn't register, so
+                // the round-trip GetBlockPrefab(ghost.dpsType) returns null. There is no OTHER
+                // variant to recreate into -> same variant by definition -> teleport. Falling to
+                // 'return false' here (silently) would make HasUnhandledState refuse every such
+                // device with 'surface' forever - hence the explicit branch and log line.
+                if (reqPrefab == null) { Note($"[t] '{original.name}' has no variant prefab for dps={dps} -> single-variant, teleport"); return true; }
+                string origBase = original.name.Replace("(Clone)", "").Trim();
+                bool same = origBase == reqPrefab.name;
+                if (!same) Note($"[t] variant differs: orig='{origBase}' req='{reqPrefab.name}' (dps={dps}, origDps={original.dpsType}) -> recreate path");
+                return same;
+            }
+            // a silent 'catch -> false' here once ate the only evidence of a refusal bug (every
+            // legit input returned true; only a swallowed throw could refuse) - never mute this
+            // catch again
+            catch (System.Exception ex) { Warn($"SameVariant threw for '{original?.name}' dps={dps}: {ex}"); return false; }
+        }
+
+        private static byte[] BuildTeleportPayload(uint idx, Vector3 pos, Vector3 rot)
+        {
+            using var ms = new MemoryStream();
+            using var w = new BinaryWriter(ms);
+            w.Write(MoveMagic); w.Write((byte)7); w.Write(idx);
+            w.Write(pos.x); w.Write(pos.y); w.Write(pos.z);
+            w.Write(rot.x); w.Write(rot.y); w.Write(rot.z);
+            return ms.ToArray();
+        }
+
+        private static void SendTeleport(Steamworks.CSteamID to, uint idx, Vector3 pos, Vector3 rot)
+        {
+            if (!to.IsValid()) return;
+            var payload = BuildTeleportPayload(idx, pos, rot);
+            try { Steamworks.SteamNetworking.SendP2PPacket(to, payload, (uint)payload.Length, Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel); }
+            catch (System.Exception ex) { Warn("send teleport: " + ex.Message); }
+            // idempotent - repeat twice against session drops (a lost transform packet otherwise waits
+            // for the probe to converge)
+            _tpSends.Add(new TpSend { To = to, Payload = payload, Next = Time.realtimeSinceStartup + 1f, Left = 2 });
+        }
+
+        private static void ProcessTeleportResends()
+        {
+            for (int i = _tpSends.Count - 1; i >= 0; i--)
+            {
+                var s = _tpSends[i];
+                if (Time.realtimeSinceStartup < s.Next) continue;
+                try { Steamworks.SteamNetworking.SendP2PPacket(s.To, s.Payload, (uint)s.Payload.Length, Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel); } catch { }
+                s.Left--; s.Next = Time.realtimeSinceStartup + 2f;
+                if (s.Left <= 0) _tpSends.RemoveAt(i);
+            }
+        }
+
+        // Real Steam ids of remote peers, learned from ReadP2PPacket senders (move channel + log
+        // relay - the relay batches keep this fresh the whole session). This is the only
+        // trustworthy address source: vanilla 'SendP2P' is PlayFab Party, not Steam -
+        // Network_UserId/remoteUsers keys are PlayFab EntityKey ids (hex), so casting one to
+        // CSteamID addresses nobody and the packet vanishes silently. Packets sent to a real
+        // ReadP2PPacket sender id always arrive. (Raft_Network.cs:1858 SendP2P resolves
+        // Network_UserId against PlayFabMultiplayerManager.RemotePlayers.)
+        private static readonly Dictionary<ulong, float> _knownPeers = new Dictionary<ulong, float>();
+        internal static void RegisterPeer(Steamworks.CSteamID id)
+        {
+            if (id.IsValid()) _knownPeers[id.m_SteamID] = Time.realtimeSinceStartup;
+        }
+
+        private static void BroadcastTeleport(Block b)
+        {
+            if (b == null) return;
+            if (_tpReqSender.IsValid()) RegisterPeer(_tpReqSender); // requester always covered
+            foreach (var sid in _knownPeers.Keys)
+                SendTeleport(new Steamworks.CSteamID(sid), b.ObjectIndex, b.transform.localPosition, b.transform.localEulerAngles);
+        }
+
+        // HOST: teleport `b` (+ deps found by the flip-test scan, same rigid delta) to pos/rot, then
+        // verify support; a spot that never settles is undone by simply putting the transforms back.
+        // deps may be null/empty: the block moves alone.
+        // Block_Pipe covers pipe SEGMENTS and pipe-network DEVICES - Placeable_BatteryCharger's
+        // block component IS Block_Pipe, so excluding pipes wholesale would make the charger
+        // unmovable. Such a block wires itself into the world at
+        // placement (OnFinishedPlacementLate: TileBitmaskManager.AddTile + Refresh(neighbours) +
+        // OnPipePlaced -> fluid-group merge) and unwinds at removal (OnDestroy: OnPipeRemoved +
+        // RemoveTile + RefreshNeighbours). A bare transform teleport left the tile registered at the
+        // OLD cell and the pipe in the OLD group. Replaying those exact calls around the move makes
+        // teleport VALID for pipes again: same object, state (charger batteries/fuel) intact.
+        // Vanilla gating mirrored: tiles on ALL sides, OnPipePlaced/Removed host-only. The
+        // OnMeshChange/OnCompleteVisual handlers stay subscribed - the BitmaskTile instance is never
+        // destroyed - so no double-wiring. OnPipePlaced re-reads transform.position, so call it AFTER
+        // the transform is set (and OnPipeRemoved BEFORE, while snappedBuildingPosition still matches).
+        private static void PipeLifecycle(Block b, bool place)
+        {
+            var bp = b as Block_Pipe;
+            if (bp == null) return;
+            try
+            {
+                var cons = Traverse.Create(bp).Field("pipeBitmaskConnections").GetValue<Block_PipeBitmask[]>();
+                if (cons == null) return;
+                foreach (var con in cons)
+                {
+                    if (con == null) continue;
+                    if (!place)
+                    {
+                        if (Raft_Network.IsHost && con.pipe != null) con.pipe.OnPipeRemoved();
+                        if (con.bitmaskTile != null)
+                        { TileBitmaskManager.RemoveTile(con.bitmaskTile); con.bitmaskTile.RefreshNeighbours(); }
+                    }
+                    else
+                    {
+                        if (con.bitmaskTile != null)
+                        { TileBitmaskManager.AddTile(con.bitmaskTile); con.bitmaskTile.Refresh(refreshNeighbour: true); }
+                        if (Raft_Network.IsHost && con.pipe != null) con.pipe.OnPipePlaced();
+                    }
+                }
+            }
+            catch (System.Exception ex) { Warn($"pipe lifecycle ({(place ? "place" : "remove")}) '{b.name}': {ex.Message}"); }
+        }
+
+        private static void BeginTeleport(Block b, Vector3 pos, Vector3 rot, Steamworks.CSteamID reqSender, List<Block> deps)
+        {
+            _tpBlock = b; _tpOldPos = b.transform.localPosition; _tpOldRot = b.transform.localEulerAngles;
+            _tpReqSender = reqSender;
+            _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
+
+            var dR = Quaternion.Euler(rot) * Quaternion.Inverse(Quaternion.Euler(_tpOldRot));
+            PipeLifecycle(b, place: false);
+            if (deps != null) foreach (var d in deps)
+            {
+                if (d == null) continue;
+                _tpDeps.Add(d);
+                _tpDepsOldPos.Add(d.transform.localPosition);
+                _tpDepsOldRot.Add(d.transform.localRotation);
+                PipeLifecycle(d, place: false);
+                d.transform.localPosition = pos + dR * (d.transform.localPosition - _tpOldPos);
+                d.transform.localRotation = dR * d.transform.localRotation;
+                PipeLifecycle(d, place: true);
+            }
+            b.transform.localPosition = pos;
+            b.transform.localEulerAngles = rot;
+            PipeLifecycle(b, place: true);
+            Physics.SyncTransforms();
+            _tpVerifyStart = Time.frameCount;
+            _tpVerifyDeadlineTime = Time.realtimeSinceStartup + 6f;
+            _tpVerifying = true;
+        }
+
+        private static void PollTeleportVerify()
+        {
+            if (_tpBlock == null) { _tpVerifying = false; _tpDeps.Clear(); _tpReqSender = default; return; }
+            bool stable = false;
+            try { stable = _tpBlock.IsStable(); } catch { }
+            if (stable)
+            {
+                int delta = Time.frameCount - _tpVerifyStart;
+                BroadcastTeleport(_tpBlock);
+                foreach (var d in _tpDeps) if (d != null) BroadcastTeleport(d);
+                Note($"moved to {_tpBlock.transform.localPosition.ToString("F2")} (+{delta}f, teleport)"
+                    + (_tpDeps.Count > 0 ? $"; carried {_tpDeps.Count} on top" : ""));
+                _tpBlock = null; _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
+                _tpVerifying = false; _tpReqSender = default;
+                return;
+            }
+            if (Time.realtimeSinceStartup > _tpVerifyDeadlineTime)
+            {
+                LogStability(_tpBlock);
+                for (int i = 0; i < _tpDeps.Count; i++)
+                    if (_tpDeps[i] != null)
+                    {
+                        PipeLifecycle(_tpDeps[i], place: false);
+                        _tpDeps[i].transform.localPosition = _tpDepsOldPos[i]; _tpDeps[i].transform.localRotation = _tpDepsOldRot[i];
+                        PipeLifecycle(_tpDeps[i], place: true);
+                    }
+                PipeLifecycle(_tpBlock, place: false);
+                _tpBlock.transform.localPosition = _tpOldPos;
+                _tpBlock.transform.localEulerAngles = _tpOldRot;
+                PipeLifecycle(_tpBlock, place: true);
+                Physics.SyncTransforms();
+                NoteHud(Loc.T("no_support"));
+                if (_tpReqSender.IsValid()) SendMoveRefusal(_tpReqSender, _tpBlock.ObjectIndex, "no_support");
+                _tpBlock = null; _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
+                _tpVerifying = false; _tpReqSender = default;
+            }
+        }
+    }
+}
