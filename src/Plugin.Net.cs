@@ -551,6 +551,18 @@ namespace PickUpMove
             _pendingDepRestores.Clear();
         }
 
+        // Full undo of a host move: discard the new copies (base + any moved dependents), restore
+        // the hidden original. Safe when no dependents were moved - both discards no-op on empty lists.
+        private static void UndoHostMove(Block nb)
+        {
+            DiscardNewDependents();
+            RestoreDependentColliders();
+            _plantBroadcastPlots.Clear();   // undone move - nothing to announce
+            DeregisterCropplotPlants(nb);   // its restored plants must not shadow the surviving original
+            try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
+            RestoreHidden();
+        }
+
         private static void PollHostVerify()
         {
             if (_hostNb == null)
@@ -610,12 +622,7 @@ namespace PickUpMove
                 {
                     if (!TryMoveDependents(original, nb, player, out string depFail))
                     {
-                        DiscardNewDependents();
-                        RestoreDependentColliders();
-                        _plantBroadcastPlots.Clear(); // undone move - nothing to announce
-                        DeregisterCropplotPlants(nb); // its restored plants are registered - don't shadow the surviving original
-                        try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
-                        RestoreHidden();
+                        UndoHostMove(nb);
                         Note(depFail);
                         if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, depFail);
                         ResetHostVerify();
@@ -640,12 +647,7 @@ namespace PickUpMove
                         if (depWait != _hostRestoreWait) { Trace($"dep restore wait: {depWait}"); _hostRestoreWait = depWait; }
                         if (Time.realtimeSinceStartup <= _hostVerifyDeadlineTime) return; // retry next frame
                         Warn($"dep restore never verified ({depWait}) - reverting the whole move.");
-                        DiscardNewDependents();
-                        RestoreDependentColliders();
-                        _plantBroadcastPlots.Clear();
-                        DeregisterCropplotPlants(nb);
-                        try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
-                        RestoreHidden();
+                        UndoHostMove(nb);
                         if (_hostReqSender.IsValid()) SendMoveRefusal(_hostReqSender, original != null ? original.ObjectIndex : 0u, "r_move_failed");
                         ResetHostVerify();
                         return;
