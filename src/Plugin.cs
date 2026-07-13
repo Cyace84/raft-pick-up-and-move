@@ -87,7 +87,8 @@ namespace PickUpMove
                 false,
                 "Debug aid, off by default. Write this mod's lines to per-session files " +
                 "(BepInEx/PickUpMoveLogs/) and, when playing as a client, relay them to the host so a " +
-                "co-op issue can be diagnosed from one machine. Only this mod's own lines are sent.");
+                "co-op issue can be diagnosed from one machine. Sends this mod's own lines plus the " +
+                "game's errors/exceptions and block/storage lookup failures - nothing else.");
             LogRelay.Init(RelayLogs.Value);
 
             // Own DontDestroyOnLoad ticker: BaseUnityPlugin.Update is not pumped in this env and the

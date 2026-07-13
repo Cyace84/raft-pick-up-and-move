@@ -37,6 +37,67 @@ namespace PickUpMove
             _stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
             _dir = Path.Combine(Paths.BepInExRootPath, "PickUpMoveLogs");
             try { Directory.CreateDirectory(_dir); } catch { }
+            // Vanilla-log tap. The 07-13 zombie-chest incident was undiagnosable because the
+            // client's BepInEx config captured no Unity-source lines at all: the game's own
+            // markers (BlockCreator.Deserialize logs "Could not remove block because no block
+            // with index N" on a failed remove lookup) never reached her disk. Subscribing to
+            // Application.logMessageReceived (CoreModule decomp: Application.cs:363, delegate
+            // LogCallback(condition, stackTrace, type):40) is independent of BepInEx's log
+            // config, so the relay sees them regardless of the peer's BepInEx.cfg. Filtered
+            // hard (errors/exceptions + known block/storage markers) - channel 121 stays quiet.
+            try { Application.logMessageReceived += OnUnityLog; } catch { }
+        }
+
+        // Only these vanilla Info-level lines matter to move diagnosis; everything else Info/Warning
+        // from Unity is noise and stays local. Errors/exceptions always travel.
+        private static readonly string[] UnityMarkers =
+        {
+            "Could not remove block",   // BlockCreator.cs:1732 - remove-by-index lookup failed
+            "Could not close storage",  // StorageManager:193  - slots-sync lookup failed
+            "Could not open storage",
+        };
+
+        private static string _lastUnityLine;
+        private static float _lastUnityTime;
+        private static int _unityRepeats;
+
+        private static void OnUnityLog(string condition, string stackTrace, LogType type)
+        {
+            if (!_enabled) return;
+            try
+            {
+                bool always = type == LogType.Exception || type == LogType.Error || type == LogType.Assert;
+                if (!always)
+                {
+                    if (condition == null) return;
+                    bool marked = false;
+                    foreach (var m in UnityMarkers) if (condition.Contains(m)) { marked = true; break; }
+                    if (!marked) return;
+                }
+                // per-frame spam guard: identical line within 5s collapses into one repeat counter
+                float now = Time.realtimeSinceStartup;
+                if (condition == _lastUnityLine && now - _lastUnityTime < 5f) { _unityRepeats++; return; }
+                if (_unityRepeats > 0)
+                {
+                    Record(LogLevel.Debug, $"[unity] last line repeated {_unityRepeats} more time(s)");
+                    _unityRepeats = 0;
+                }
+                _lastUnityLine = condition; _lastUnityTime = now;
+
+                var line = $"[unity/{type}] {condition}";
+                if (type == LogType.Exception && !string.IsNullOrEmpty(stackTrace))
+                {
+                    // top of the stack is enough to localize the throw; keep relay packets small
+                    int cut = 0, newlines = 0;
+                    for (int i = 0; i < stackTrace.Length && newlines < 3; i++)
+                        if (stackTrace[i] == '\n') { newlines++; cut = i; }
+                    var top = cut > 0 ? stackTrace.Substring(0, cut) : stackTrace;
+                    if (top.Length > 400) top = top.Substring(0, 400);
+                    line += " | " + top.Replace('\n', ';');
+                }
+                Record(LogLevel.Info, line);
+            }
+            catch { }
         }
 
         // Fed directly by Plugin.Emit (no BepInEx log-bus hook), so the file/relay sink is INDEPENDENT
