@@ -99,6 +99,12 @@ namespace PickUpMove
             go.AddComponent<Ticker>();
             _tickerGo = go;
 
+            // R3: reset all move-related statics on a full world switch. The Ticker (and thus every
+            // static) is DontDestroyOnLoad, so without this a stale pending move / request queue /
+            // peer roster leaks into the next world. Single-mode only: story islands load additively
+            // and must NOT wipe an in-flight move or the peer roster.
+            UnityEngine.SceneManagement.SceneManager.sceneLoaded += OnSceneLoaded;
+
             // ONE Harmony postfix for the in-world "Move" key hint (see architecture note). Invoked by
             // the game's raycast system, independent of our Update; patches persist past Awake.
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
@@ -110,9 +116,15 @@ namespace PickUpMove
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
         // patch, and clear carry state so a hot-reloaded copy doesn't duplicate input handling or the
         // OnIsRayed postfix. No-op cost in production (never called outside the dev reloader).
+        private static void OnSceneLoaded(UnityEngine.SceneManagement.Scene scene, UnityEngine.SceneManagement.LoadSceneMode mode)
+        {
+            if (mode == UnityEngine.SceneManagement.LoadSceneMode.Single) ResetSessionState();
+        }
+
         public static void __MonoLabUnload()
         {
             try { Harmony.UnpatchID(Guid); } catch { }
+            try { UnityEngine.SceneManagement.SceneManager.sceneLoaded -= OnSceneLoaded; } catch { }
             // Destroy EVERY ticker we (or an older hot-reloaded copy) ever spawned. The ticker is
             // HideAndDontSave, which FindObjectsOfType misses - Resources.FindObjectsOfTypeAll sees it.
             // Without this, stacked reloads leave multiple tickers, each with its own `Moving` static,
@@ -175,8 +187,20 @@ namespace PickUpMove
             if (_pickupScan != null) StepDepScan(_pickupScan);
             if (_awaitingHostMove) PollClientMove();
             PollRestoreWatches(); // restore watchdog: must run even while other moves verify
+            PollRemovalChecks();  // deferred 'did the removal actually take' postcondition (R5)
             if (_tpVerifying) { PollTeleportVerify(); return; }
             if (_hostVerifying) { PollHostVerify(); return; }
+
+            // R5: fake-null carry. The block being carried was destroyed by another peer (or a
+            // cascade) mid-carry: managed-alive but Unity-null, so every 'Moving == null' guard below
+            // reads it as gone and skips BOTH the M and RMB cancel paths - build mode wedges with a
+            // live ghost. Detect the managed-alive-but-Unity-dead state and tear the carry down.
+            if (!ReferenceEquals(Moving, null) && Moving == null)
+            {
+                Warn("carry: the block being moved was destroyed by another peer; canceling the carry.");
+                CancelMove();
+                return;
+            }
 
             if (MoveKey.Value.IsDown())
             {

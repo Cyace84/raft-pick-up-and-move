@@ -77,14 +77,33 @@ namespace PickUpMove
             QueueModSend(to, BuildTeleportPayload(idx, pos, rot));
         }
 
-        // Fire-and-forget for any idempotent mod-channel payload (teleport kind 7, paint kind 9):
-        // send now, then repeat twice against session drops. Safe ONLY for notifies whose re-apply
-        // is a no-op; request/ack kinds must NOT go through here.
+        // Fire-and-forget for any idempotent mod-channel payload (teleport kind 7, paint kind 9,
+        // move-done kind 10): send now, then repeat twice against session drops. Safe ONLY for
+        // notifies whose re-apply is a no-op; request/ack kinds must NOT go through here.
+        // payload layout: magic(4) kind(1) idx(4) ...
+        private static (byte kind, uint idx) PayloadKindIdx(byte[] p)
+            => (p == null || p.Length < 9) ? ((byte)0, 0u) : (p[4], System.BitConverter.ToUInt32(p, 5));
+
         private static void QueueModSend(Steamworks.CSteamID to, byte[] payload)
         {
             if (!to.IsValid()) return;
             try { Steamworks.SteamNetworking.SendP2PPacket(to, payload, (uint)payload.Length, Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel); }
             catch (System.Exception ex) { Warn("mod-channel send: " + ex.Message); }
+            // R4: keep ONE queued resend per (peer, kind, idx) - the newest payload replaces an older
+            // queued one. ProcessTeleportResends walks _tpSends BACKWARD, so two entries for the same
+            // key maturing in one frame (a 2-moves-in-one-hitch burst) would re-send newest->oldest
+            // and leave the ordered reliable channel ending on the STALE position (permanent once
+            // Left hits 0). Deduping the queue removes that ordering hazard entirely.
+            var (k, idx) = PayloadKindIdx(payload);
+            for (int i = 0; i < _tpSends.Count; i++)
+            {
+                var e = _tpSends[i];
+                if (e.To.m_SteamID != to.m_SteamID) continue;
+                var (ek, ei) = PayloadKindIdx(e.Payload);
+                if (ek != k || ei != idx) continue;
+                e.Payload = payload; e.Next = Time.realtimeSinceStartup + 1f; e.Left = 2;
+                return;
+            }
             _tpSends.Add(new TpSend { To = to, Payload = payload, Next = Time.realtimeSinceStartup + 1f, Left = 2 });
         }
 

@@ -453,13 +453,57 @@ namespace PickUpMove
                     if (inv.allSlots.Count == 0) { why = "inventory UI never initialized (HUD hidden?)"; return false; }
                 }
                 inv.SetSlotsFromRGD(slots);
+                // DEEP read-back (R5): the old count-only check passed whenever the FILLED-slot count
+                // matched, so a truncated stack, a wrong item, or a mis-indexed slot slipped through as
+                // 'restored'. GetRGDSlots reflects the live inventory; RGD_Slot.Equals compares
+                // slotIndex+itemIndex+amount+uses+exclusiveString (RGD_Slot.cs:41-48). We match each
+                // carried filled slot to the read-back slot with the same slotIndex and deep-compare.
+                // A false negative only costs a few retry frames then a loud apply-anyway (the caller's
+                // deadline path) - never data loss - so this is strictly safer than the count check.
+                var back = inv.GetRGDSlots();
                 int expected = 0; foreach (var s in slots) if (s != null && s.HasItem) expected++;
-                int actual = 0;
-                foreach (var sl in inv.allSlots) if (sl != null && !sl.IsEmpty) actual++;
-                if (actual != expected) { why = $"read-back {actual}/{expected} filled slots"; return false; }
+                if (back == null) { why = $"read-back returned no slots (expected {expected})"; return false; }
+                // strict cardinality: GetRGDSlots returns ONLY filled slots, so any extra entry is a
+                // slot the restore should have cleared (SetSlotsFromRGD SetItem(null)s unmatched ones).
+                if (back.Length != expected) { why = $"read-back has {back.Length} filled slots, expected {expected}"; return false; }
+                int mismatch = 0;
+                foreach (var want in slots)
+                {
+                    if (want == null || !want.HasItem) continue;
+                    RGD_Slot got = null;
+                    foreach (var b in back) if (b != null && b.slotIndex == want.slotIndex) { got = b; break; }
+                    if (got == null || !want.Equals(got)) mismatch++;
+                }
+                if (mismatch != 0) { why = $"read-back {mismatch}/{expected} carried slots differ (deep compare)"; return false; }
                 return true;
             }
-            catch (System.Exception ex) { why = "restore threw: " + ex.Message; return false; }
+            catch (System.Exception ex) { why = "verify threw: " + ex.Message; return false; }
+        }
+
+        // Order-independent deep equality of two slot snapshots (filled slots matched by slotIndex,
+        // fields compared by RGD_Slot.Equals: itemIndex, amount, uses, exclusiveString). Used by the
+        // commit gate to detect content drift between capture and commit.
+        private static bool SlotsEqual(RGD_Slot[] a, RGD_Slot[] b)
+        {
+            try
+            {
+                int fa = 0, fb = 0;
+                if (a != null) foreach (var s in a) if (s != null && s.HasItem) fa++;
+                if (b != null) foreach (var s in b) if (s != null && s.HasItem) fb++;
+                if (fa != fb) return false;
+                if (fa == 0) return true;
+                foreach (var s in a)
+                {
+                    if (s == null || !s.HasItem) continue;
+                    RGD_Slot m = null;
+                    foreach (var t in b) if (t != null && t.slotIndex == s.slotIndex) { m = t; break; }
+                    if (m == null || !s.Equals(m)) return false;
+                }
+                return true;
+            }
+            // treat a throw as 'not equal': the caller then re-applies the fresh capture, which is
+            // idempotent - strictly safer than assuming the stale snapshot still matches.
+            catch { return false; }
         }
 
         // Sign/plaque text (and any TextWriterObject-backed block). Null for everything else.

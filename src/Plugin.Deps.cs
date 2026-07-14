@@ -255,7 +255,7 @@ namespace PickUpMove
 
         private static void DiscardNewDependents()
         {
-            foreach (var d in _newDependents) if (d != null) { DeregisterCropplotPlants(d); try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
+            foreach (var d in _newDependents) if (d != null) { DeregisterCropplotPlants(d); RemoveBlockChecked(d, "discard new dependents"); }
             _newDependents.Clear(); _depOriginals.Clear();
         }
 

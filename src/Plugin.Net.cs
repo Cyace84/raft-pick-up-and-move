@@ -28,15 +28,20 @@ namespace PickUpMove
         private static RGD_Slot[] _clientMoveSlots;
         private static Paint _clientMovePaint;
         private static string _clientMoveText;
-        private static Vector3 _clientMovePos;
         private static bool _clientMoveRestored;
+        // R2: the host names the new block's object index in a kind-10 'move done' packet, so the
+        // client targets THAT block instead of guessing by distance (a nearby unrelated block within
+        // 1m of the ghost could win the old search and receive our device state + storage echo).
+        // _clientMoveOrigIndex survives phase 1 (unlike _pendingClientMoveOriginal, cleared there) so
+        // the kind-10 handler can still match the reply to this move.
+        private static uint _clientMoveOrigIndex;
+        private static uint _clientMoveNewIndex;
         // [t] timing probes (first-move-of-type can take seconds on the host) + refusal-relay state
         private static float _cmSentTime;          // Time.realtimeSinceStartup when the request left
         private static bool _cmOrigGoneLogged;
         private static bool _cmSeenLogged;
         private static Steamworks.CSteamID _hostReqSender; // valid = current verify is a client request
         private static float _hostReqRecvTime;
-        private static readonly HashSet<uint> _preExisting = new HashSet<uint>();
         // HOST place-first verify: nb is created but the original is removed only once nb settles to
         // IsStable() over a few physics steps (the same-frame check reads stale). The original stays
         // hidden until then, so a never-settling spot is undone with nothing lost.
@@ -138,7 +143,7 @@ namespace PickUpMove
                             {
                                 RestoreHidden();
                                 _pendingClientMoveOriginal = null; _awaitingHostMove = false;
-                                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null; _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
                                 NoteHud(Loc.T(reason));
                             }
                         }
@@ -173,10 +178,18 @@ namespace PickUpMove
                             {
                                 RestoreHidden();
                                 _pendingClientMoveOriginal = null; _awaitingHostMove = false;
-                                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                                _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null; _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
                                 Note($"[t] teleported {Time.realtimeSinceStartup - _cmSentTime:F2}s after request");
                                 Note("client: host moved it.");
                             }
+                        }
+                        else if (kind == 10) // move done: the host names the new block's object index
+                        {
+                            uint newIdx = r.ReadUInt32();
+                            // match on the index we asked to move (survives phase 1, unlike the pending
+                            // reference). Idempotent: resends just re-set the same field.
+                            if (_awaitingHostMove && origIndex == _clientMoveOrigIndex && _clientMoveOrigIndex != 0)
+                                _clientMoveNewIndex = newIdx;
                         }
                         else if (kind == 6) // probe reply: does the original still exist on the host?
                         {
@@ -198,7 +211,7 @@ namespace PickUpMove
                                     catch { }
                                     RestoreHidden();
                                     _pendingClientMoveOriginal = null; _awaitingHostMove = false;
-                                    _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                                    _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null; _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
                                     Note("client: synced with the host.");
                                 }
                                 else
@@ -225,13 +238,13 @@ namespace PickUpMove
             catch (System.Exception ex) { Warn("refusal poll: " + ex.Message); }
         }
 
-        private sealed class MoveReq { public byte[] Buf; public Steamworks.CSteamID Sender; public float RecvTime; }
+        private sealed class MoveReq { public byte[] Buf; public Steamworks.CSteamID Sender; public float RecvTime; public uint Idx; }
         private static readonly Queue<MoveReq> _moveReqQueue = new Queue<MoveReq>();
         // origIndexes whose client canceled the request before we started it (packet types: 1=request,
         // 2=refusal, 3=ack, 4=cancel, 5=probe, 6=probe-reply). A newer request for the same index
         // supersedes an older cancel (per-peer FIFO ordering on the reliable channel guarantees the
         // cancel always drains before the retry).
-        private static readonly HashSet<uint> _canceledReqs = new HashSet<uint>();
+        private static readonly HashSet<(ulong sender, uint idx)> _canceledReqs = new HashSet<(ulong, uint)>();
         // CLIENT: host acknowledged our pending move request (it WILL answer with success or refusal,
         // so the blind timeout no longer applies); probe = zombie check after a lost verdict.
         private static bool _cmAcked, _cmProbeSent;
@@ -254,6 +267,19 @@ namespace PickUpMove
                     Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel);
             }
             catch (System.Exception ex) { Warn("send ctl: " + ex.Message); }
+        }
+
+        // HOST -> requesting CLIENT: name the new block's object index once the recreate move is
+        // committed (R2). Rides the idempotent resend queue (the new block's create may still be
+        // replicating); the client stores the index and targets THAT block for its local device
+        // restore instead of guessing the nearest block to the ghost.
+        private static void SendMoveDone(Steamworks.CSteamID to, uint origIndex, uint newIndex)
+        {
+            if (!to.IsValid()) return;
+            using var ms = new MemoryStream();
+            using var w = new BinaryWriter(ms);
+            w.Write(MoveMagic); w.Write((byte)10); w.Write(origIndex); w.Write(newIndex);
+            QueueModSend(to, ms.ToArray());
         }
 
         // HOST: always drain the socket (so packets don't pile up in Steam's buffer), but run only ONE
@@ -310,13 +336,30 @@ namespace PickUpMove
                                 // it's in flight and doesn't blind-timeout into a split brain (observed:
                                 // >10s Steam transit -> client gave up + retried while we executed the
                                 // stale request anyway -> zombie chest / dupes / 'couldn't find').
-                            _canceledReqs.Remove(idx); // a retry supersedes any older cancel
+                            _canceledReqs.Remove((sender.m_SteamID, idx)); // a retry supersedes any older cancel FROM THE SAME PEER
                             SendMoveCtl(sender, 3, idx);
-                            _moveReqQueue.Enqueue(new MoveReq { Buf = buf, Sender = sender, RecvTime = Time.realtimeSinceStartup });
+                            _moveReqQueue.Enqueue(new MoveReq { Buf = buf, Sender = sender, RecvTime = Time.realtimeSinceStartup, Idx = idx });
                             break;
-                        case 4: // cancel: drop the request if we haven't started it
-                            _canceledReqs.Add(idx);
-                            Note($"[t] client canceled move request for block #{idx}");
+                        case 4: // cancel: drop the request if we haven't started it. Keyed by
+                                // (sender, idx): two players moving the same object index in different
+                                // sub-rafts must not cancel each other (idx is unique per world, but a
+                                // 3-player revival scenario can retry an index another peer still owns).
+                                // PURGE the queue NOW, not just tombstone: a later retry (case 1) removes
+                                // the tombstone, which would RESURRECT a canceled request still sitting
+                                // in the queue (cancel -> retry -> stale req1 executes, then req2).
+                                // Per-peer FIFO guarantees the cancel drains before any retry, so purging
+                                // here catches every request the cancel was aimed at.
+                            _canceledReqs.Add((sender.m_SteamID, idx));
+                            {
+                                int qn = _moveReqQueue.Count, purged = 0;
+                                for (int qi = 0; qi < qn; qi++)
+                                {
+                                    var m = _moveReqQueue.Dequeue();
+                                    if (m.Sender.m_SteamID == sender.m_SteamID && m.Idx == idx) { purged++; continue; }
+                                    _moveReqQueue.Enqueue(m);
+                                }
+                                Note($"[t] client canceled move request for block #{idx}" + (purged > 0 ? $" ({purged} purged from queue)" : ""));
+                            }
                             break;
                         case 9: // paint notify from a client mover: apply to our authoritative view,
                                 // then fan out to every OTHER peer (the mover already painted its own)
@@ -360,9 +403,7 @@ namespace PickUpMove
             while (!_hostVerifying && !_tpVerifying && _reqScan == null && Moving == null && _moveReqQueue.Count > 0)
             {
                 var req = _moveReqQueue.Dequeue();
-                uint reqIdx = 0;
-                try { using var r = new BinaryReader(new MemoryStream(req.Buf)); r.ReadUInt32(); r.ReadByte(); reqIdx = r.ReadUInt32(); } catch { }
-                if (_canceledReqs.Remove(reqIdx)) { Note($"[t] skipped canceled move request #{reqIdx}"); continue; }
+                if (_canceledReqs.Remove((req.Sender.m_SteamID, req.Idx))) { Note($"[t] skipped canceled move request #{req.Idx}"); continue; }
                 HandleMoveRequest(req);
                 break;
             }
@@ -412,6 +453,14 @@ namespace PickUpMove
             // teleport-only types must not be rebuilt (unhandled state would be lost)
             if (HasUnhandledState(original))
             { SendMoveRefusal(req.Sender, origIndex, "surface"); return; }
+
+            // R1 (host): an OPEN storage's edits are invisible until Message_Storage_Close lands
+            // (StorageManager.cs:190 applies slots only on close) - a snapshot taken now is stale by
+            // construction and the editor's close would target a removed index (vanilla drops it,
+            // items lost/duped). Refuse the RECREATE; the teleport branch above is safe (same object
+            // index survives, the close lands on it). Re-checked at commit in FinishHostMove.
+            if (original is Storage_Small stBusy && stBusy.IsOpen)
+            { SendMoveRefusal(req.Sender, origIndex, "r_busy"); return; }
 
             // authoritative capture from the original block (host owns the real state)
             var slots = (original is Storage_Small st && st.GetInventoryReference() != null)
@@ -481,7 +530,7 @@ namespace PickUpMove
                         SendMoveCtl(hostId, 4, _pendingClientMoveOriginal.ObjectIndex);
                         RestoreHidden();
                         _pendingClientMoveOriginal = null; _awaitingHostMove = false;
-                        _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                        _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null; _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
                         NoteHud(Loc.T("no_request"));
                     }
                     else if (!_cmProbeSent)
@@ -496,59 +545,54 @@ namespace PickUpMove
                         // probe also unanswered - the link is gone; keep the original, nothing lost
                         RestoreHidden();
                         _pendingClientMoveOriginal = null; _awaitingHostMove = false;
-                        _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+                        _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null; _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
                         NoteHud(Loc.T("no_answer"));
                     }
                 }
                 return;
             }
 
-            // PHASE 2: original is gone - find the freshly-replicated block near where we placed the ghost
-            // and restore our local view on it.
+            // PHASE 2: original is gone - target the new block by the object index the host NAMED
+            // (kind-10), never by distance (R2). We restore ONLY device state locally: slots, paint
+            // and sign text all arrive from the host's OWN authoritative replication
+            // (Message_Storage_Close RPC, kind-9 paint notify, SetTextNetworked). Echoing our
+            // pickup-time snapshot back is R1 - the host applies it unconditionally over whatever it
+            // holds NOW, so a chest the host edited (or another player opened) during our carry is
+            // duped/wiped. The client is never a source of block state anymore.
             if (!_clientMoveRestored)
             {
                 if (!_cmOrigGoneLogged) { Note($"[t] original removed {Time.realtimeSinceStartup - _cmSentTime:F2}s after request"); _cmOrigGoneLogged = true; }
-                Block best = null; float bestSqr = 1f; // within ~1 unit of where we placed the ghost
-                foreach (var b in BlockCreator.GetPlacedBlocks())
-                {
-                    if (b == null || _preExisting.Contains(b.ObjectIndex)) continue;
-                    float d = (b.transform.localPosition - _clientMovePos).sqrMagnitude;
-                    if (d < bestSqr) { bestSqr = d; best = b; }
-                }
-                if (best != null && !_cmSeenLogged) { Note($"[t] new block first seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request (stable={best.IsStable()})"); _cmSeenLogged = true; }
+                Block best = _clientMoveNewIndex != 0 ? BlockCreator.GetBlockByObjectIndex(_clientMoveNewIndex) : null;
+                if (best != null && !_cmSeenLogged) { Note($"[t] new block #{_clientMoveNewIndex} seen {Time.realtimeSinceStartup - _cmSentTime:F2}s after request (stable={best.IsStable()})"); _cmSeenLogged = true; }
                 bool graceOver = Time.frameCount > _clientMoveDeadlineFrame + 180;
                 if (best != null && (best.IsStable() || graceOver))
                 {
-                    // grace expiring with the block present but never reading stable: restore anyway -
-                    // silently dropping the restore here is what lost paint/contents on the client's view.
-                    if (!best.IsStable()) Warn("client: new block never read stable locally; restoring its state anyway.");
-                    // storage restore gate, client view: wait for the final inventory + read back
-                    // before calling it restored; keep polling until the grace runs out, then apply loudly.
-                    if (!TryRestoreSlotsVerified(best, _clientMoveSlots, out string cw) && !graceOver)
-                    {
-                        if (cw != _hostRestoreWait) { Trace($"client restore wait: {cw}"); _hostRestoreWait = cw; }
-                        return; // retry next tick
-                    }
-                    if (cw != null) Warn($"client: storage restore unverified ({cw}); applying anyway.");
-                    var player = ComponentManager<Network_Player>.Value;
-                    try { ApplyState(best, _clientMoveSlots, _clientMoveRgd, _clientMovePaint, _clientMoveText, player); WatchRestore(best, _clientMoveSlots); }
-                    catch (System.Exception ex) { Warn("client local restore: " + ex.Message); }
+                    // device state (cooking progress, fuel, charger batteries...) does NOT replicate
+                    // back from the host's programmatic restore, so the client re-applies it locally.
+                    // Wait for the block to settle first (device RestoreBlock wants placement finished);
+                    // apply anyway once grace runs out. ApplyDeviceState is view-only here (cropplot
+                    // re-plant is host-gated inside).
+                    if (!best.IsStable()) Warn("client: new block never read stable locally; applying device state anyway.");
+                    try { ApplyDeviceState(_clientMoveRgd, best); }
+                    catch (System.Exception ex) { Warn("client device restore: " + ex.Message); }
                     _clientMoveRestored = true;
                 }
                 else if (!graceOver)
                 {
-                    return; // grace: give the new block a moment to arrive/settle
+                    return; // grace: wait for kind-10, the new block to replicate in, and it to settle
                 }
                 else
                 {
-                    // the host removed the original (phase 1 passed) but no new block ever showed up
-                    // near our ghost position - say so instead of claiming success.
-                    Warn($"client: original removed but no new block appeared within 1m of {_clientMovePos.ToString("F2")}; local state not re-applied.");
+                    // host never named a new block (kind-10 lost AND the recreate path) - say so
+                    // instead of guessing. Slots/paint/text still arrive via the host's vanilla sync;
+                    // only local device view may be stale until a reload.
+                    if (_clientMoveNewIndex == 0) Warn("client: host never confirmed a new block index (kind-10 lost); device view may be stale until reload.");
+                    else Warn($"client: new block #{_clientMoveNewIndex} never replicated in; device view not re-applied.");
                 }
             }
 
             _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
-            _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+            _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null; _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
             _awaitingHostMove = false;
             Note($"[t] client move total {Time.realtimeSinceStartup - _cmSentTime:F2}s (request -> restored)");
             Note("client: host moved it.");
@@ -571,6 +615,48 @@ namespace PickUpMove
             _hostVerifying = true;
         }
 
+        // R3: the Ticker is DontDestroyOnLoad, so EVERY move-related static survives a world switch
+        // (quit to menu, load another save). A fake-null _pendingClientMoveOriginal, a stale
+        // _moveReqQueue entry, or a half-finished verify would then run against the NEW world - on a
+        // matching object index it can move or remove the wrong block, and a leftover _knownPeers
+        // addresses ghosts. Wipe all session state on a full (Single) scene load. The old world's
+        // objects are being torn down, so we only clear references (no RestoreHidden - those
+        // renderers/colliders are already gone).
+        internal static void ResetSessionState()
+        {
+            // carry
+            Moving = null; _movingItem = null; _movingSlots = null; _movingText = null; _movingRgd = null;
+            _movingPaint = default;
+            _hiddenColliders.Clear(); _hiddenRenderers.Clear(); _hiddenCanvases.Clear();
+            _carryDeps.Clear(); _pickupScan = null; _reqScan = null;
+            _rearmBuild = false; _bcWasInactive = false;
+            try { DestroyGhostPreviews(); } catch { }
+
+            // client-side pending move
+            _awaitingHostMove = false; _pendingClientMoveOriginal = null;
+            _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null;
+            _clientMovePaint = default; _clientMoveRestored = false;
+            _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
+            _cmAcked = false; _cmProbeSent = false; _cmOrigGoneLogged = false; _cmSeenLogged = false;
+
+            // host verify + request queue
+            ResetHostVerify();
+            _moveReqQueue.Clear(); _canceledReqs.Clear();
+
+            // teleport
+            _tpBlock = null; _tpVerifying = false; _tpReqSender = default;
+            _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
+            _tpSends.Clear();
+
+            // dependents / plants / restore watchdog
+            _depOriginals.Clear(); _newDependents.Clear(); _depColliderDisabled.Clear(); _depMovedCount = 0;
+            _pendingDepRestores.Clear(); _plantBroadcastPlots.Clear();
+            _restoreWatches.Clear(); _removalChecks.Clear();
+
+            // roster + beacon relearn from packets in the new session
+            _knownPeers.Clear(); _nextHello = 0f;
+        }
+
         // Every exit from a host verify (success, revert, vanish) drops ALL of this state -
         // a field that survives here leaks into the next move's verify.
         private static void ResetHostVerify()
@@ -581,6 +667,42 @@ namespace PickUpMove
             _pendingDepRestores.Clear();
         }
 
+        // Remove a block and VERIFY it actually went away (R5). RemoveBlockNetwork can silently
+        // no-op (a de-registered block, a fake-null shadow) and the callers then claim success -> a
+        // duplicate survives. Removal is a COROUTINE (RemoveBlockCoroutine -> DestroyBlock yields,
+        // BlockCreator.cs:510), so placedBlocks.Remove happens over the next frames, NOT
+        // synchronously - a same-frame postcondition would false-warn on every success. We instead
+        // schedule a check ~2s later: GetBlockByObjectIndex(idx) still resolving to this exact live
+        // object means the removal never took.
+        private sealed class RemovalCheck { public Block B; public uint Idx; public string Where; public float At; }
+        private static readonly List<RemovalCheck> _removalChecks = new List<RemovalCheck>();
+        private static void RemoveBlockChecked(Block b, string where)
+        {
+            if (ReferenceEquals(b, null)) return;
+            uint idx = b.ObjectIndex;
+            try { BlockCreator.RemoveBlockNetwork(b, null, true); }
+            catch (System.Exception ex) { Warn($"{where}: RemoveBlockNetwork threw for #{idx}: {ex.Message}"); }
+            _removalChecks.Add(new RemovalCheck { B = b, Idx = idx, Where = where, At = Time.realtimeSinceStartup + 2f });
+        }
+
+        // Deferred postcondition for RemoveBlockChecked. still != null uses Unity's overload, so a
+        // destroyed/fake-null block reads null and does NOT false-trip; only a live, still-registered
+        // block (the no-op case) warns.
+        private static void PollRemovalChecks()
+        {
+            if (_removalChecks.Count == 0) return;
+            float now = Time.realtimeSinceStartup;
+            for (int i = _removalChecks.Count - 1; i >= 0; i--)
+            {
+                var c = _removalChecks[i];
+                if (now < c.At) continue;
+                _removalChecks.RemoveAt(i);
+                var still = BlockCreator.GetBlockByObjectIndex(c.Idx);
+                if (still != null && ReferenceEquals(still, c.B))
+                    Warn($"{c.Where}: block #{c.Idx} still present ~2s after RemoveBlockNetwork - the removal no-oped, likely a duplicate. Please report this line.");
+            }
+        }
+
         // Full undo of a host move: discard the new copies (base + any moved dependents), restore
         // the hidden original. Safe when no dependents were moved - both discards no-op on empty lists.
         private static void UndoHostMove(Block nb)
@@ -589,7 +711,7 @@ namespace PickUpMove
             RestoreDependentColliders();
             _plantBroadcastPlots.Clear();   // undone move - nothing to announce
             DeregisterCropplotPlants(nb);   // its restored plants must not shadow the surviving original
-            try { BlockCreator.RemoveBlockNetwork(nb, null, true); } catch { }
+            RemoveBlockChecked(nb, "undo host move");
             RestoreHidden();
         }
 
@@ -620,18 +742,59 @@ namespace PickUpMove
         // announce moved plants, report, reset.
         private static void FinishHostMove(Block nb, Block original, RGD_Slot[] slots, Network_Player player, int delta)
         {
+            // capture the requester + indices BEFORE removal/reset: the client targets the new block
+            // by index (R2), not by distance. origIndex is the shared networked index the client sent.
+            var reqSender = _hostReqSender;
+            uint origIndex = original != null ? original.ObjectIndex : 0u;
+            uint newIndex = nb != null ? nb.ObjectIndex : 0u;
+
+            // R1 (host): `slots` was captured at request/pickup time; the original lived on through
+            // the multi-frame verify and its content can have changed since (edits apply only on
+            // Message_Storage_Close, StorageManager.cs:190). Still OPEN at commit -> the editor's
+            // close is still in flight and MUST land on the ORIGINAL index -> abort the whole move,
+            // nothing lost. Closed -> re-read the original NOW and, if it drifted from the snapshot,
+            // commit the fresh content to nb and re-sync peers. This is the last read before the
+            // original's index dies.
+            if (original != null && original is Storage_Small osCommit)
+            {
+                if (osCommit.IsOpen)
+                {
+                    UndoHostMove(nb);
+                    if (reqSender.IsValid()) SendMoveRefusal(reqSender, origIndex, "r_busy");
+                    else NoteHud(Loc.T("r_busy"));
+                    ResetHostVerify();
+                    Note("commit aborted: the storage is open right now; move undone, nothing lost.");
+                    return;
+                }
+                var invO = osCommit.GetInventoryReference();
+                var fresh = invO != null ? invO.GetRGDSlots() : null;
+                if (!SlotsEqual(slots, fresh))
+                {
+                    slots = fresh;
+                    if (nb is Storage_Small nbs && nbs.GetInventoryReference() != null)
+                    {
+                        try { nbs.GetInventoryReference().SetSlotsFromRGD(fresh); SendStorageSync(nbs, player); }
+                        catch (System.Exception ex) { Warn("commit recapture: " + ex.Message); }
+                        Note("storage changed during verify; committed the fresh contents.");
+                    }
+                }
+            }
+
             _hiddenColliders.Clear();
             _hiddenRenderers.Clear();
             _hiddenCanvases.Clear();
             // remove originals: dependents first (their colliders were disabled during detection),
             // then the base block - nothing rests on it now, so no cascade victims.
-            foreach (var d in _depOriginals) if (d != null) { DeregisterCropplotPlants(d); try { BlockCreator.RemoveBlockNetwork(d, null, true); } catch { } }
+            foreach (var d in _depOriginals) if (d != null) { DeregisterCropplotPlants(d); RemoveBlockChecked(d, "finish host move (dep)"); }
             _depOriginals.Clear(); _depColliderDisabled.Clear(); _newDependents.Clear();
-            if (original != null) { DeregisterCropplotPlants(original); try { BlockCreator.RemoveBlockNetwork(original, null, true); } catch { } }
+            if (original != null) { DeregisterCropplotPlants(original); RemoveBlockChecked(original, "finish host move"); }
 
             // originals are gone on every peer (reliable ordered channel) - now announce the moved
             // plants so clients recreate them through the game's own planting path (harvest-linked).
             FlushPlantBroadcasts(player);
+
+            // tell the requesting client which block is the move's result (R2)
+            if (reqSender.IsValid()) SendMoveDone(reqSender, origIndex, newIndex);
 
             int restored = slots?.Length ?? 0;
             Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"

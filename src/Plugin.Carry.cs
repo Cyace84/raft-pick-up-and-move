@@ -79,6 +79,13 @@ namespace PickUpMove
             // isn't necessarily SUPPORTED BY this one. Known limitation: moving a surface with loose
             // decor on it (a table) can drop that decor. Revisit with a real support-graph query.
 
+            // R1 (host): an OPEN storage's edits are invisible until its Message_Storage_Close
+            // lands (StorageManager.cs:190 applies slots only on close), so any snapshot taken now
+            // is guaranteed stale. Refuse the pickup early; the commit gate in FinishHostMove is
+            // the authoritative backstop (a remote open may not have replicated to us yet).
+            if (block is Storage_Small sBusy && sBusy.IsOpen)
+            { NoteHud(Loc.T("r_busy")); return; }
+
             // storage contents: only storages carry an inventory; other placeables carry no slots.
             _movingSlots = (block is Storage_Small storage && storage.GetInventoryReference() != null)
                 ? storage.GetInventoryReference().GetRGDSlots() : null;
@@ -128,7 +135,10 @@ namespace PickUpMove
 
         internal static void CancelMove()
         {
-            if (Moving == null) return;
+            // ReferenceEquals, not ==: a block destroyed by another peer mid-carry is Unity-null
+            // (== null true) but managed-alive. We must still tear the carry down, so only bail when
+            // there is genuinely no carry object at all.
+            if (ReferenceEquals(Moving, null)) return;
             if (_pickupScan != null) FinishDepScan(_pickupScan, abort: true);
             _carryDeps.Clear();
             // restore the hidden original
@@ -394,9 +404,9 @@ namespace PickUpMove
             // and restore it on our own view (host's restore doesn't replicate device state back).
             _clientMoveRgd = _movingRgd; _clientMoveSlots = _movingSlots;
             _clientMovePaint = _movingPaint; _clientMoveText = _movingText;
-            _clientMovePos = pos; _clientMoveRestored = false;
-            _preExisting.Clear();
-            foreach (var b in BlockCreator.GetPlacedBlocks()) if (b != null) _preExisting.Add(b.ObjectIndex);
+            _clientMoveRestored = false;
+            // R2: remember which block we asked to move; the host answers with kind-10 {orig,new}.
+            _clientMoveOrigIndex = original.ObjectIndex; _clientMoveNewIndex = 0;
             _pendingClientMoveOriginal = original;
             _awaitingHostMove = true;
             _clientMoveDeadlineFrame = Time.frameCount + 600; // ~10s failsafe
