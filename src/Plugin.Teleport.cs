@@ -74,12 +74,17 @@ namespace PickUpMove
 
         private static void SendTeleport(Steamworks.CSteamID to, uint idx, Vector3 pos, Vector3 rot)
         {
+            QueueModSend(to, BuildTeleportPayload(idx, pos, rot));
+        }
+
+        // Fire-and-forget for any idempotent mod-channel payload (teleport kind 7, paint kind 9):
+        // send now, then repeat twice against session drops. Safe ONLY for notifies whose re-apply
+        // is a no-op; request/ack kinds must NOT go through here.
+        private static void QueueModSend(Steamworks.CSteamID to, byte[] payload)
+        {
             if (!to.IsValid()) return;
-            var payload = BuildTeleportPayload(idx, pos, rot);
             try { Steamworks.SteamNetworking.SendP2PPacket(to, payload, (uint)payload.Length, Steamworks.EP2PSend.k_EP2PSendReliable, MoveChannel); }
-            catch (System.Exception ex) { Warn("send teleport: " + ex.Message); }
-            // idempotent - repeat twice against session drops (a lost transform packet otherwise waits
-            // for the probe to converge)
+            catch (System.Exception ex) { Warn("mod-channel send: " + ex.Message); }
             _tpSends.Add(new TpSend { To = to, Payload = payload, Next = Time.realtimeSinceStartup + 1f, Left = 2 });
         }
 

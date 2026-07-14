@@ -492,10 +492,19 @@ namespace PickUpMove
 
         // Re-apply captured paint to the freshly-placed chest: locally via SetInstanceColorAndPattern
         // (sets both the Block fields - so it persists through save/load - and the material property
-        // block, so it shows), and over the network via the vanilla Message_PaintBlock so connected
-        // peers recolour their replica. Host RPCs to Other; a client SendP2P's to the host (which
-        // re-broadcasts), mirroring PaintBrush. A side is networked only when both its colours are
-        // non-null (Message_PaintBlock's ctor reads color.uniqueColorIndex and would NPE on null).
+        // block, so it shows), and to peers via a MOD-CHANNEL notify (kind 9), NOT the vanilla
+        // Message_PaintBlock. The vanilla path is unusable for a synthetic (brushless) paint: the
+        // receiver's Network_Player.Deserialize (:1127) runs PaintBrush.PaintBlock on the SENDER'S
+        // replica, and PaintBrush lives on the equipped-brush GameObject - inactive unless that
+        // player is actually holding the brush, so UsableTool.Start (:29), which assigns
+        // playerNetwork, never ran -> NRE at PaintBrush.PaintBlock:298 (playerNetwork.IsLocalPlayer).
+        // The receive pipeline has ZERO try/catch (NetworkUpdateManager, Raft_Network's compound
+        // foreach), so that one throw kills the REST of the same batch too: paint was always lost
+        // on peers, and any remove/sync coalesced behind it died with it (the 07-13 zombie chest).
+        // Runtime artifact: client relay 07-14 01:55:17 [unity/Exception] NRE PaintBrush.PaintBlock
+        // <- Network_Player.Deserialize. Tradeoff of the mod channel: peers WITHOUT this mod see
+        // default colour until their next world (re)load - paint persists via the host-side Block
+        // fields, so the save is always right.
         private static void ApplyPaint(Block nb, Paint p, Network_Player player)
         {
             if (nb == null || !p.Any) return;
@@ -505,30 +514,62 @@ namespace PickUpMove
                 nb.SetInstanceColorAndPattern(p.cB, p.pcB, 2, p.pi2);
             }
             catch (System.Exception ex) { Warn("paint apply failed: " + ex.Message); }
-
-            if (player?.Network == null) return;
-            var pos = nb.transform.localPosition;
-            // Message_PaintBlock's ctor reads BOTH color.uniqueColorIndex and patternColor.uniqueColorIndex,
-            // so a null patternColor (solid paint, no pattern) can't be sent as-is - but silently skipping
-            // the side meant a solid-painted block lost its colour on every other peer (the client-move
-            // chest regression). Substitute the main colour: with the block's own patternIndex the
-            // pattern colour is inert when no pattern is set.
-            try
-            {
-                if (p.cA != null) SendPaint(player, nb.ObjectIndex, pos, p.cA, p.pcA != null ? p.pcA : p.cA, 1, p.pi1);
-                if (p.cB != null) SendPaint(player, nb.ObjectIndex, pos, p.cB, p.pcB != null ? p.pcB : p.cB, 2, p.pi2);
-            }
+            try { SendPaintNotify(nb.ObjectIndex, p); }
             catch (System.Exception ex) { Warn("paint network failed: " + ex.Message); }
         }
 
-        private static void SendPaint(Network_Player player, uint boi, Vector3 pos,
-            SO_ColorValue color, SO_ColorValue patternColor, int side, uint patternIndex)
+        // ---- kind 9 wire format (after magic+kind+idx): cA, pcA, pi1, cB, pcB, pi2. Colors travel
+        // as SO_ColorValue.uniqueColorIndex (uint field, SO_ColorValue:8), 0xFFFFFFFF = null side,
+        // resolved back via static ColorPicker.GetColorFromUniqueIndex(uint) (ColorPicker:87).
+        private const uint NoColor = 0xFFFFFFFFu;
+
+        private static byte[] BuildPaintPayload(uint idx, Paint p)
         {
-            var msg = new Message_PaintBlock(Messages.PaintBlock, player, boi, pos, color, patternColor, side, patternIndex);
+            using var ms = new MemoryStream();
+            using var w = new BinaryWriter(ms);
+            w.Write(MoveMagic); w.Write((byte)9); w.Write(idx);
+            w.Write(p.cA != null ? p.cA.uniqueColorIndex : NoColor);
+            w.Write(p.pcA != null ? p.pcA.uniqueColorIndex : NoColor);
+            w.Write(p.pi1);
+            w.Write(p.cB != null ? p.cB.uniqueColorIndex : NoColor);
+            w.Write(p.pcB != null ? p.pcB.uniqueColorIndex : NoColor);
+            w.Write(p.pi2);
+            return ms.ToArray();
+        }
+
+        // Host -> every known peer; client -> host (which re-broadcasts to the others on receive).
+        // Rides the same idempotent resend queue as teleports (2 repeats over ~3s): a notify that
+        // beats the vanilla create replication just no-ops on the peer and a resend converges it.
+        private static void SendPaintNotify(uint idx, Paint p)
+        {
+            var payload = BuildPaintPayload(idx, p);
             if (Raft_Network.IsHost)
-                player.Network.RPC(msg, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+            {
+                foreach (var sid in _knownPeers.Keys)
+                    QueueModSend(new Steamworks.CSteamID(sid), payload);
+            }
             else
-                player.SendP2P(msg, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+            {
+                var net = ComponentManager<Raft_Network>.Value;
+                QueueModSend(net != null ? net.CurrentSteamHost : default, payload);
+            }
+        }
+
+        // Apply a kind-9 notify to our local replica: the exact calls the mover makes on its side.
+        // Reader sits right after idx. Missing block = not replicated yet; a resend converges it.
+        private static void ApplyPaintNotify(BinaryReader r, uint idx)
+        {
+            SO_ColorValue Rd() { uint i = r.ReadUInt32(); return i == NoColor ? null : ColorPicker.GetColorFromUniqueIndex(i); }
+            var cA = Rd(); var pcA = Rd(); uint pi1 = r.ReadUInt32();
+            var cB = Rd(); var pcB = Rd(); uint pi2 = r.ReadUInt32();
+            var b = BlockCreator.GetBlockByObjectIndex(idx);
+            if (b == null) return;
+            try
+            {
+                b.SetInstanceColorAndPattern(cA, pcA, 1, pi1);
+                b.SetInstanceColorAndPattern(cB, pcB, 2, pi2);
+            }
+            catch (System.Exception ex) { Warn("paint notify apply failed: " + ex.Message); }
         }
     }
 }

@@ -153,6 +153,10 @@ namespace PickUpMove
                                 if (dt > 3f) NoteHud(Loc.T("working"));
                             }
                         }
+                        else if (kind == 9) // paint notify: recolour our replica (idempotent, resent 2x)
+                        {
+                            ApplyPaintNotify(r, origIndex);
+                        }
                         else if (kind == 7) // teleport notify: the block MOVED (same object, all state intact)
                         {
                             var tpPos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
@@ -313,6 +317,20 @@ namespace PickUpMove
                         case 4: // cancel: drop the request if we haven't started it
                             _canceledReqs.Add(idx);
                             Note($"[t] client canceled move request for block #{idx}");
+                            break;
+                        case 9: // paint notify from a client mover: apply to our authoritative view,
+                                // then fan out to every OTHER peer (the mover already painted its own)
+                            try
+                            {
+                                using (var r9 = new BinaryReader(new MemoryStream(buf)))
+                                {
+                                    r9.ReadUInt32(); r9.ReadByte(); r9.ReadUInt32(); // magic+kind+idx, re-skip
+                                    ApplyPaintNotify(r9, idx);
+                                }
+                                foreach (var sid in _knownPeers.Keys)
+                                    if (sid != sender.m_SteamID) QueueModSend(new Steamworks.CSteamID(sid), buf);
+                            }
+                            catch (System.Exception ex) { Warn("paint notify (host): " + ex.Message); }
                             break;
                         case 5: // probe: does this block still exist here? reply carries the current
                                 // transform so the client converges even when every notify was lost

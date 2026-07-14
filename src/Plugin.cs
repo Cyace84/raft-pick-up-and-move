@@ -166,7 +166,8 @@ namespace PickUpMove
         internal static void Tick()
         {
             LogRelay.Tick();
-            if (Raft_Network.IsHost) { PollMoveRequests(); ProcessTeleportResends(); } else { PollMoveRefusals(); SendHello(); }
+            if (Raft_Network.IsHost) PollMoveRequests(); else { PollMoveRefusals(); SendHello(); }
+            ProcessTeleportResends(); // both roles: teleport notifies (host) AND paint notifies (either side)
             // vanilla-style dependent scans need a settle frame between collider toggles and IsStable
             // reads (DestroyBlock does 'yield return null' for the same reason) - step them before
             // anything below can early-return.
