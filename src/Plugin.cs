@@ -188,6 +188,7 @@ namespace PickUpMove
             if (_awaitingHostMove) PollClientMove();
             PollRestoreWatches(); // restore watchdog: must run even while other moves verify
             PollRemovalChecks();  // deferred 'did the removal actually take' postcondition (R5)
+            PollClaim();          // carry-claim lifecycle: release/heartbeat/TTL (one M per block)
             if (_tpVerifying) { PollTeleportVerify(); return; }
             if (_hostVerifying) { PollHostVerify(); return; }
 

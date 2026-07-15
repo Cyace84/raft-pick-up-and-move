@@ -86,6 +86,12 @@ namespace PickUpMove
             if (block is Storage_Small sBusy && sBusy.IsOpen)
             { NoteHud(Loc.T("r_busy")); return; }
 
+            // CLAIM: someone else is carrying this block right now - one M per block, no exceptions.
+            // (host checks the authoritative table, a client checks its mirror; the in-flight race
+            // is arbitrated host-side and the loser's carry is torn down via kind-14.)
+            if (IsClaimedByOther(block.ObjectIndex))
+            { NoteHud(Loc.T("r_carry")); return; }
+
             // storage contents: only storages carry an inventory; other placeables carry no slots.
             _movingSlots = (block is Storage_Small storage && storage.GetInventoryReference() != null)
                 ? storage.GetInventoryReference().GetRGDSlots() : null;
@@ -95,6 +101,7 @@ namespace PickUpMove
             _movingText = TryGetSignText(block);
             _movingRgd = TryCaptureRgd(block);
             Moving = block;
+            AcquireCarryClaim(block.ObjectIndex); // claim it for us: everyone else's M now refuses
             ClearHintIfShown(); // leaving idle -> drop our hint; build-mode UI takes over
 
             // Hide the original while carrying so its mesh+collider don't block placing the

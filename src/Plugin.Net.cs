@@ -183,6 +183,17 @@ namespace PickUpMove
                                 Note("client: host moved it.");
                             }
                         }
+                        else if (kind == 13) // claim mirror update: idx is (un)claimed by owner
+                        {
+                            byte claimed = r.ReadByte(); ulong owner = r.ReadUInt64();
+                            if (claimed != 0) _claimMirror[origIndex] = owner; else _claimMirror.Remove(origIndex);
+                        }
+                        else if (kind == 14) // claim denied: someone else already carries it - drop ours
+                        {
+                            if (!ReferenceEquals(Moving, null) && Moving != null && Moving.ObjectIndex == origIndex)
+                            { NoteHud(Loc.T("r_carry")); CancelMove(); }
+                            if (_carryClaimIdx == origIndex) _carryClaimIdx = 0; // never got it - nothing to release
+                        }
                         else if (kind == 10) // move done: the host names the new block's object index
                         {
                             uint newIdx = r.ReadUInt32();
@@ -243,6 +254,115 @@ namespace PickUpMove
         // idx -> realtime of that block's last committed move (teleport keeps the index alive, so a
         // stale queued request could re-move it; recreate is covered by the zombie gate as well).
         private static readonly Dictionary<uint, float> _movedAt = new Dictionary<uint, float>();
+
+        // ---------------- CARRY CLAIM ("one M per block") ----------------
+        // Picking a block up CLAIMS it for the carrier; everyone else's M on it is refused until the
+        // carry resolves. Optimistic: M starts the carry instantly, the claim races to the host
+        // (kind-11); the host arbitrates ties (first claim wins, host wins simultaneous) and fans the
+        // verdict out (kind-13 to mirrors, kind-14 deny tears the loser's carry down). A carrier that
+        // vanishes can't wedge the block: client claims expire 30s after the last heartbeat
+        // (kind-11 re-sent every 10s while carrying).
+        private struct Claim { public ulong Owner; public float At; }
+        private static readonly Dictionary<uint, Claim> _claims = new Dictionary<uint, Claim>();      // HOST: authoritative
+        private static readonly Dictionary<uint, ulong> _claimMirror = new Dictionary<uint, ulong>(); // CLIENT: local mirror
+        private static uint _carryClaimIdx;      // the claim WE hold (both roles)
+        private static float _claimNextBeat;     // client heartbeat timer
+        private static float _claimsNextPrune;   // host TTL sweep timer
+        private const float ClaimTtl = 30f;
+
+        private static ulong SelfId()
+        { try { return Steamworks.SteamUser.GetSteamID().m_SteamID; } catch { return 0; } }
+
+        // both roles, called from the pickup gate: is this block claimed by someone else?
+        internal static bool IsClaimedByOther(uint idx)
+        {
+            ulong self = SelfId();
+            if (Raft_Network.IsHost)
+                return _claims.TryGetValue(idx, out var c) && c.Owner != self;
+            return _claimMirror.TryGetValue(idx, out var o) && o != self;
+        }
+
+        // both roles, called right after the carry starts (Moving = block)
+        internal static void AcquireCarryClaim(uint idx)
+        {
+            _carryClaimIdx = idx;
+            if (Raft_Network.IsHost) HostSetClaim(idx, SelfId());
+            else { SendClaimCtl(11, idx); _claimNextBeat = Time.realtimeSinceStartup + 10f; }
+        }
+
+        private static void SendClaimCtl(byte kind, uint idx) // CLIENT -> host: 11 claim, 12 release
+        {
+            try
+            {
+                var np = ComponentManager<Network_Player>.Value;
+                var hostId = np?.Network != null ? np.Network.CurrentSteamHost : default;
+                if (!hostId.IsValid()) return;
+                using var ms = new MemoryStream(); using var w = new BinaryWriter(ms);
+                w.Write(MoveMagic); w.Write(kind); w.Write(idx);
+                QueueModSend(hostId, ms.ToArray());
+            }
+            catch (System.Exception ex) { Warn("send claim: " + ex.Message); }
+        }
+
+        private static void HostSetClaim(uint idx, ulong owner)
+        {
+            _claims[idx] = new Claim { Owner = owner, At = Time.realtimeSinceStartup };
+            BroadcastClaim(idx, owner, claimed: true);
+        }
+
+        private static void HostReleaseClaim(uint idx)
+        {
+            if (!_claims.Remove(idx)) return;
+            BroadcastClaim(idx, 0, claimed: false);
+        }
+
+        private static void BroadcastClaim(uint idx, ulong owner, bool claimed) // HOST -> every client
+        {
+            try
+            {
+                using var ms = new MemoryStream(); using var w = new BinaryWriter(ms);
+                w.Write(MoveMagic); w.Write((byte)13); w.Write(idx);
+                w.Write((byte)(claimed ? 1 : 0)); w.Write(owner);
+                var data = ms.ToArray();
+                foreach (var sid in _knownPeers.Keys)
+                    if (sid != owner) QueueModSend(new Steamworks.CSteamID(sid), data);
+            }
+            catch (System.Exception ex) { Warn("claim broadcast: " + ex.Message); }
+        }
+
+        // central claim lifecycle, runs every Tick on both roles: releases the claim no matter WHICH
+        // path ended the carry (place, RMB/M cancel, fake-null teardown, refusal) - a client's claim
+        // is held through the whole pending-move phase so nobody grabs the block mid-resolution.
+        internal static void PollClaim()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (_carryClaimIdx != 0)
+            {
+                bool carrying = !ReferenceEquals(Moving, null) && Moving != null;
+                bool resolving = _awaitingHostMove
+                    || (Raft_Network.IsHost && (_hostVerifying || _tpVerifying || _reqScan != null || _pickupScan != null));
+                if (!carrying && !resolving)
+                {
+                    if (Raft_Network.IsHost) HostReleaseClaim(_carryClaimIdx);
+                    else SendClaimCtl(12, _carryClaimIdx);
+                    _carryClaimIdx = 0;
+                }
+                else if (!Raft_Network.IsHost && now >= _claimNextBeat)
+                { SendClaimCtl(11, _carryClaimIdx); _claimNextBeat = now + 10f; }
+            }
+            // HOST: expire client claims whose carrier stopped heartbeating (crash, quit, lost link)
+            if (Raft_Network.IsHost && _claims.Count > 0 && now >= _claimsNextPrune)
+            {
+                _claimsNextPrune = now + 5f;
+                ulong self = SelfId();
+                List<uint> drop = null;
+                foreach (var kv in _claims)
+                    if (kv.Value.Owner != self && now - kv.Value.At > ClaimTtl)
+                        (drop ??= new List<uint>()).Add(kv.Key);
+                if (drop != null) foreach (var i in drop) { Note($"[t] claim on #{i} expired (carrier silent {ClaimTtl:F0}s)"); HostReleaseClaim(i); }
+            }
+        }
+        // ------------------------------------------------------------------
         // origIndexes whose client canceled the request before we started it (packet types: 1=request,
         // 2=refusal, 3=ack, 4=cancel, 5=probe, 6=probe-reply). A newer request for the same index
         // supersedes an older cancel (per-peer FIFO ordering on the reliable channel guarantees the
@@ -353,6 +473,22 @@ namespace PickUpMove
                             SendMoveCtl(sender, 3, idx);
                             _moveReqQueue.Enqueue(new MoveReq { Buf = buf, Sender = sender, RecvTime = Time.realtimeSinceStartup, Idx = idx });
                             break;
+                        case 11: // claim (also heartbeat): first claim wins; the host's own carry wins ties
+                        {
+                            if (_claims.TryGetValue(idx, out var cl) && cl.Owner != sender.m_SteamID)
+                            {
+                                // taken - tear the optimistic carry down on the loser
+                                using var msD = new MemoryStream(); using var wD = new BinaryWriter(msD);
+                                wD.Write(MoveMagic); wD.Write((byte)14); wD.Write(idx);
+                                QueueModSend(sender, msD.ToArray());
+                            }
+                            else HostSetClaim(idx, sender.m_SteamID); // new claim or heartbeat refresh
+                            break;
+                        }
+                        case 12: // release - only the owner can free its claim
+                            if (_claims.TryGetValue(idx, out var rl) && rl.Owner == sender.m_SteamID)
+                                HostReleaseClaim(idx);
+                            break;
                         case 4: // cancel: drop the request if we haven't started it. Keyed by
                                 // (sender, idx): two players moving the same object index in different
                                 // sub-rafts must not cancel each other (idx is unique per world, but a
@@ -456,6 +592,11 @@ namespace PickUpMove
             // _removalChecks additionally names every index WE committed for removal (~2s window).
             if (!original.gameObject.activeInHierarchy || _removalChecks.Exists(c => c.Idx == origIndex))
             { SendMoveRefusal(req.Sender, origIndex, "r_gone"); return; }
+            // CLAIM gate: the block is claimed by a DIFFERENT player than the requester - someone
+            // else is carrying it right now; this move must not run (mirrors the pickup-side refusal
+            // for requests that raced past a mirror update).
+            if (_claims.TryGetValue(origIndex, out var reqClm) && reqClm.Owner != req.Sender.m_SteamID)
+            { SendMoveRefusal(req.Sender, origIndex, "r_carry"); return; }
             // MOVED-EPOCH gate (the teleport twin of the zombie gate; observed 07-15: host places,
             // the client's QUEUED request then drains and re-moves the chest to the client's spot -
             // 'the host always loses'). A request RECEIVED before the block's latest committed move
@@ -674,6 +815,7 @@ namespace PickUpMove
             // host verify + request queue
             ResetHostVerify();
             _moveReqQueue.Clear(); _canceledReqs.Clear(); _movedAt.Clear();
+            _claims.Clear(); _claimMirror.Clear(); _carryClaimIdx = 0;
 
             // teleport
             _tpBlock = null; _tpVerifying = false; _tpReqSender = default;
