@@ -198,6 +198,7 @@ namespace PickUpMove
             if (!ReferenceEquals(Moving, null) && Moving == null)
             {
                 Warn("carry: the block being moved was destroyed by another peer; canceling the carry.");
+                NoteHud(Loc.T("r_gone")); // tell the player WHY the ghost vanished, not just the log
                 CancelMove();
                 return;
             }

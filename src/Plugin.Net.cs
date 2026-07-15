@@ -430,7 +430,9 @@ namespace PickUpMove
             catch { return; }
 
             var original = BlockCreator.GetBlockByObjectIndex(origIndex);
-            if (original == null) { SendMoveRefusal(req.Sender, origIndex, "r_not_found"); return; }
+            // null in practice means 'removed since the client saw it' (a client can only request a
+            // block that existed on its screen), so the honest verdict is 'gone', not 'not found'.
+            if (original == null) { SendMoveRefusal(req.Sender, origIndex, "r_gone"); return; }
             // ZOMBIE gate: removal is a coroutine (RemoveBlockCoroutine -> DestroyBlock,
             // BlockCreator.cs:510), so a block committed for removal stays in placedBlocks for a few
             // frames. Observed dup (07-15 02:55:05): host and client both carried the same chest;
@@ -440,7 +442,7 @@ namespace PickUpMove
             // so an inactive original = mid-destruction, whoever initiated it (mod or vanilla axe).
             // _removalChecks additionally names every index WE committed for removal (~2s window).
             if (!original.gameObject.activeInHierarchy || _removalChecks.Exists(c => c.Idx == origIndex))
-            { SendMoveRefusal(req.Sender, origIndex, "r_not_found"); return; }
+            { SendMoveRefusal(req.Sender, origIndex, "r_gone"); return; }
             var item = original.buildableItem;
             if (item == null) { SendMoveRefusal(req.Sender, origIndex, "r_no_rebuild"); return; }
             var player = ComponentManager<Network_Player>.Value;
