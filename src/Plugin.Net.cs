@@ -431,6 +431,16 @@ namespace PickUpMove
 
             var original = BlockCreator.GetBlockByObjectIndex(origIndex);
             if (original == null) { SendMoveRefusal(req.Sender, origIndex, "r_not_found"); return; }
+            // ZOMBIE gate: removal is a coroutine (RemoveBlockCoroutine -> DestroyBlock,
+            // BlockCreator.cs:510), so a block committed for removal stays in placedBlocks for a few
+            // frames. Observed dup (07-15 02:55:05): host and client both carried the same chest;
+            // host's place removed the original, the client's QUEUED request drained the same frame,
+            // resolved the zombie and recreated it -> two chests with the same 12 slots. DestroyBlock
+            // SetActive(false)s the block SYNCHRONOUSLY before its first yield (BlockCreator.cs:595),
+            // so an inactive original = mid-destruction, whoever initiated it (mod or vanilla axe).
+            // _removalChecks additionally names every index WE committed for removal (~2s window).
+            if (!original.gameObject.activeInHierarchy || _removalChecks.Exists(c => c.Idx == origIndex))
+            { SendMoveRefusal(req.Sender, origIndex, "r_not_found"); return; }
             var item = original.buildableItem;
             if (item == null) { SendMoveRefusal(req.Sender, origIndex, "r_no_rebuild"); return; }
             var player = ComponentManager<Network_Player>.Value;
