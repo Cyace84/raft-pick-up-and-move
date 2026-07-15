@@ -240,6 +240,9 @@ namespace PickUpMove
 
         private sealed class MoveReq { public byte[] Buf; public Steamworks.CSteamID Sender; public float RecvTime; public uint Idx; }
         private static readonly Queue<MoveReq> _moveReqQueue = new Queue<MoveReq>();
+        // idx -> realtime of that block's last committed move (teleport keeps the index alive, so a
+        // stale queued request could re-move it; recreate is covered by the zombie gate as well).
+        private static readonly Dictionary<uint, float> _movedAt = new Dictionary<uint, float>();
         // origIndexes whose client canceled the request before we started it (packet types: 1=request,
         // 2=refusal, 3=ack, 4=cancel, 5=probe, 6=probe-reply). A newer request for the same index
         // supersedes an older cancel (per-peer FIFO ordering on the reliable channel guarantees the
@@ -336,6 +339,16 @@ namespace PickUpMove
                                 // it's in flight and doesn't blind-timeout into a split brain (observed:
                                 // >10s Steam transit -> client gave up + retried while we executed the
                                 // stale request anyway -> zombie chest / dupes / 'couldn't find').
+                            // CLAIM-lite (observed 07-15: the host lost EVERY collision): a request for
+                            // the block the HOST is carrying or mid-moving must be refused NOW, not
+                            // queued - a queued request drains right after our own place and silently
+                            // overrides it, so the host's move never sticks. Requests for OTHER blocks
+                            // still queue behind the current move as before.
+                            if ((!ReferenceEquals(Moving, null) && Moving != null && Moving.ObjectIndex == idx)
+                                || (_hostVerifying && _hostOriginal != null && _hostOriginal.ObjectIndex == idx)
+                                || (_reqScan != null && _reqScan.B != null && _reqScan.B.ObjectIndex == idx)
+                                || (_tpVerifying && _tpBlock != null && _tpBlock.ObjectIndex == idx))
+                            { SendMoveRefusal(sender, idx, "r_carry"); break; }
                             _canceledReqs.Remove((sender.m_SteamID, idx)); // a retry supersedes any older cancel FROM THE SAME PEER
                             SendMoveCtl(sender, 3, idx);
                             _moveReqQueue.Enqueue(new MoveReq { Buf = buf, Sender = sender, RecvTime = Time.realtimeSinceStartup, Idx = idx });
@@ -442,6 +455,13 @@ namespace PickUpMove
             // so an inactive original = mid-destruction, whoever initiated it (mod or vanilla axe).
             // _removalChecks additionally names every index WE committed for removal (~2s window).
             if (!original.gameObject.activeInHierarchy || _removalChecks.Exists(c => c.Idx == origIndex))
+            { SendMoveRefusal(req.Sender, origIndex, "r_gone"); return; }
+            // MOVED-EPOCH gate (the teleport twin of the zombie gate; observed 07-15: host places,
+            // the client's QUEUED request then drains and re-moves the chest to the client's spot -
+            // 'the host always loses'). A request RECEIVED before the block's latest committed move
+            // was aimed at a world that no longer exists - refuse it; a fresh M+place afterwards
+            // passes (its RecvTime postdates the commit).
+            if (_movedAt.TryGetValue(origIndex, out float mvt) && req.RecvTime < mvt)
             { SendMoveRefusal(req.Sender, origIndex, "r_gone"); return; }
             var item = original.buildableItem;
             if (item == null) { SendMoveRefusal(req.Sender, origIndex, "r_no_rebuild"); return; }
@@ -653,7 +673,7 @@ namespace PickUpMove
 
             // host verify + request queue
             ResetHostVerify();
-            _moveReqQueue.Clear(); _canceledReqs.Clear();
+            _moveReqQueue.Clear(); _canceledReqs.Clear(); _movedAt.Clear();
 
             // teleport
             _tpBlock = null; _tpVerifying = false; _tpReqSender = default;
@@ -807,6 +827,9 @@ namespace PickUpMove
 
             // tell the requesting client which block is the move's result (R2)
             if (reqSender.IsValid()) SendMoveDone(reqSender, origIndex, newIndex);
+            // moved-epoch: the zombie gate already covers the dead origIndex for its ~2s window;
+            // this stamp keeps refusing stale requests after that window too.
+            _movedAt[origIndex] = Time.realtimeSinceStartup;
 
             int restored = slots?.Length ?? 0;
             Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"

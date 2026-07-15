@@ -168,6 +168,18 @@ namespace PickUpMove
                 ["ja"]="ホストから応答がありません。元の場所のままです。",
                 ["ko"]="호스트에서 응답이 없습니다. 원래 자리에 두었습니다.", ["pl"]="Brak odpowiedzi od hosta. Pozostawiono na miejscu." },
 
+            ["r_carry"] = new Dictionary<string, string> {
+                ["en"]="Another player is moving it right now.",
+                ["ru"]="Его сейчас двигает другой игрок.",
+                ["de"]="Ein anderer Spieler bewegt ihn gerade.",
+                ["fr"]="Un autre joueur est en train de le déplacer.",
+                ["sv"]="En annan spelare flyttar den just nu.",
+                ["it"]="Un altro giocatore lo sta spostando adesso.",
+                ["pt"]="Outro jogador está movendo isso agora.",
+                ["zh"]="另一名玩家正在移动它。",
+                ["ja"]="他のプレイヤーが移動中です。",
+                ["ko"]="다른 플레이어가 옮기는 중입니다.", ["pl"]="Inny gracz właśnie go przenosi." },
+
             ["r_gone"] = new Dictionary<string, string> {
                 ["en"]="Another player just moved or removed that block.",
                 ["ru"]="Этот блок только что передвинул или убрал другой игрок.",

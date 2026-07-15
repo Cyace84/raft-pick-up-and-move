@@ -219,6 +219,11 @@ namespace PickUpMove
             if (stable)
             {
                 int delta = Time.frameCount - _tpVerifyStart;
+                // moved-epoch: stamp the commit so any request RECEIVED before this moment (aimed at
+                // the pre-move world) is refused instead of silently re-moving the block (see
+                // HandleMoveRequest). Deps moved along get stamped too - same reasoning.
+                _movedAt[_tpBlock.ObjectIndex] = Time.realtimeSinceStartup;
+                foreach (var d in _tpDeps) if (d != null) _movedAt[d.ObjectIndex] = Time.realtimeSinceStartup;
                 BroadcastTeleport(_tpBlock);
                 foreach (var d in _tpDeps) if (d != null) BroadcastTeleport(d);
                 Note($"moved to {_tpBlock.transform.localPosition.ToString("F2")} (+{delta}f, teleport)"
