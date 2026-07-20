@@ -37,10 +37,14 @@ namespace PickUpMove
             var player = ComponentManager<Network_Player>.Value;
             if (player == null) { Trace("begin: no local Network_Player."); return; }
 
-            var cam = Camera.main;
-            if (cam == null) { Trace("begin: Camera.main is null."); return; }
+            // Aim from the player's CameraTransform, NOT Camera.main: it's what vanilla
+            // BlockCreator uses for the ghost raycast, and Camera.main gets hijacked by freecam
+            // mods (UnityExplorer tags UE_Freecam as MainCamera) - M would grab from the freecam
+            // view while the ghost follows the player aim. Same transform in normal play.
+            var cam = player.CameraTransform;
+            if (cam == null) { Trace("begin: player.CameraTransform is null."); return; }
 
-            if (!Physics.Raycast(cam.transform.position, cam.transform.forward,
+            if (!Physics.Raycast(cam.position, cam.forward,
                     out var hit, Player.UseDistance * 2f, LayerMasks.MASK_Block))
             { Trace("begin: raycast hit nothing on MASK_Block."); return; }
 
