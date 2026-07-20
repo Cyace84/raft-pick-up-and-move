@@ -1,35 +1,38 @@
 [size=5][b]Pick Up & Move[/b][/size]
 
-[b]In vanilla Raft, nothing you build can be moved.[/b] Put a smelter one tile too far over and your only fix is the axe: empty it by hand, smash it for half the materials, craft it again, fill it back up.
+[b]In vanilla Raft you can pick a placed object back up (hold X), but only the object itself goes to your inventory.[/b] A chest dumps everything inside onto the floor, powered devices spit out the battery, and a cooking pot or a fuel tank loses its contents outright. Put a smelter one tile too far over and you're emptying it by hand and filling it back up.
 
-This mod skips all of that. Aim at the object, press a key, and the normal build ghost follows your cursor until you click it down where you actually wanted it. Contents and state come along: items stay in the chest, the smelt keeps smelting, paint stays on.
+This mod skips all of that. Aim at the object, press a key, and the normal build ghost follows your cursor until you click it down where you actually wanted it. Contents come along. If a smelter was halfway through a bar it picks up where it left off.
 
-Moves crafted placeables like storage, devices and decor. Raft structure stays put: foundations, walls, floors, pillars.
+It works on the things you craft and place. The raft itself is off-limits (foundations, walls, floors, pillars). That would be a different, scarier mod.
 
 [size=4][b]What can be moved[/b][/size]
-Nearly the whole catalog of placed items:
 [list]
-[*]Storages (small, medium, large, wall cabinets), items still inside.
-[*]Cooking pot, grill, juicer, smelter, purifier: recipe, progress and slots survive.
-[*]Crop plots, scarecrows, beehives: plants, integrity, combs all make the trip.
+[*]Storages of any size. Items stay inside.
+[*]Cooking pot, grill, juicer, smelter, purifier. Whatever they're currently cooking or smelting comes with them, timer and all.
+[*]Crop plots take the plants and their growth stage with them. Beehives keep the combs.
 [*]Battery chargers, biofuel refiners and fuel tanks keep whatever's in them.
 [*]Pipes rewire themselves around the new spot.
 [*]Signs and plaques keep their text.
-[*]Decor, furniture, lights, plain placeables. Paint stays on.
+[*]Decor, furniture, lights. Paint stays on.
 [/list]
 Whatever is standing on top of a moved block comes along with it. The placement ghost previews the whole group, live contents like batteries and purifier water included, tinted green or red exactly like the vanilla ghost.
 
-Two exceptions: the detail plank, whose stretch mechanic doesn't survive a move, and a zipline that still has a rope attached. Take the rope off first and the mod tells you so in-game.
+One exception: the detail plank, whose stretch mechanic doesn't survive a move.
 
 [size=4][b]How to use[/b][/size]
 Look at a movable object and press the move key (default [b]M[/b]). It lifts into placement mode and a ghost tracks your aim. Left-click to place it. Right-click, or press the key again, to cancel and leave it where it was.
 
-If a move isn't safe (wrong surface for a filled container, an unsupported spot, and so on), a short on-screen note tells you why, in your game's language (English, German, French, Italian, Polish, Portuguese, Russian, Swedish, Chinese, Japanese, Korean - most of these are machine translations, so if one reads badly, tell me and I'll fix it). Nothing is ever dropped quietly.
+Sometimes a move won't go through. When that happens, a short note at the top of the screen tells you why, in your game's language.
 
 Change the key in [font=Courier New]BepInEx/config/com.cyace84.pickupmove.cfg[/font].
 
 [size=4][b]Multiplayer[/b][/size]
-Works in co-op, as host or as a client. Anyone with the mod can move things, and moves show up live for every other player running the mod. A player without it sees the new position after rejoining, since it is saved correctly. For a clean co-op game, have everyone run the same DLL.
+Works in co-op, as host or as a client. Anyone with the mod can move things, and moves show up live for every other player running the mod.
+
+Only one player at a time can be carrying a given object. If you and another player press the key on the same chest at once, the first one gets it and the second sees a short "someone else is moving this" note. Same rule if you try to grab something a teammate is already carrying, no way to steal it or duplicate it in the process.
+
+A player without the mod sees the new position after rejoining, since it's saved correctly. For a clean co-op game, have everyone run the same DLL.
 
 [size=4][b]Bug reports[/b][/size]
 If something breaks I need the log. Open [font=Courier New]BepInEx/config/com.cyace84.pickupmove.cfg[/font], find the Logging section, set [font=Courier New]RelayLogs = true[/font], then reproduce the problem. Each game then writes this mod's own lines to [font=Courier New]BepInEx/PickUpMoveLogs/[/font], one file per session, and nothing else goes in there, so the files stay small.
