@@ -65,12 +65,12 @@ namespace PickUpMove
             // HARD EXCLUSIONS (mechanics incompatible with carry, not a state problem):
             // - Block_DetailPlank places by STRETCHING from point A to point B; a single-point carry
             //   ghost breaks it (observed: sinks under the floor, looks like it vanished). Excluded.
-            // - A zipline with a rope strung: teleporting one end leaves the rope hanging mid-air
-            //   (MeshPath connections don't follow). Detach first, then move. (v2 idea: drag the rope.)
+            // (Ziplines with a strung rope used to be excluded here; RefreshWires now re-lays the
+            //  MeshPath on the teleport path, so they move freely. The RECREATE path still drops the
+            //  rope exactly like a vanilla removal would - acceptable, and same-surface moves never
+            //  take that path.)
             if (block is Block_DetailPlank)
             { NoteHud(Loc.T("plank")); return; }
-            if (HasAttachedRope(block))
-            { NoteHud(Loc.T("rope")); return; }
 
             // STATE GATE moved to placement time: since the teleport pivot, a same-variant move keeps
             // the SAME object - all state (scarecrow integrity, beehive combs, charger batteries+fuel,
@@ -190,27 +190,100 @@ namespace PickUpMove
             var sb = b.buildableItem.settings_buildable;
             if (sb == null || !sb.Placeable) return false;
             if (b is Block_DetailPlank) return false; // A->B stretch mechanic, incompatible with carry
-            if (HasAttachedRope(b)) return false;     // zipline with a rope strung - detach first
             return true; // stateful blocks teleport with their state; recreate path gates itself
         }
 
-        // Zipline endpoints register a MeshPathBase; a strung rope is a MeshPath.PathConnections
-        // entry referencing it. (ZiplineBase.meshPath is private but a child component - decomp
-        // ZiplineBase.cs / MeshPathConnection.cs.)
-        private static bool HasAttachedRope(Block b)
+        // --- live zipline rope preview ---------------------------------------------------------
+        // While a strung zipline pole is carried, re-lay its rope(s) every frame to the GHOST's
+        // connect point (bc.selectedBlock is the same prefab, so it carries its own MeshPathBase/
+        // connectPoint) - the rope visibly follows the preview like the block ghosts do. When there
+        // is no ghost this frame (aiming at void) or the carry ends, park the rope back at the REAL
+        // poles; the teleport path then re-lays it at the destination via RefreshWires anyway, so
+        // the restore is idempotent. Local-only cosmetics: peers converge on move commit.
+        private static MeshPathBase _ropePreviewMpb;
+
+        internal static void UpdateRopePreview()
         {
-            if (!(b is ZiplineBase)) return false;
+            MeshPathBase mpb = null;
+            if (Moving is ZiplineBase && Moving != null)
+                mpb = Moving.GetComponentInChildren<MeshPathBase>(true);
+            MeshPathBase ghostMpb = null;
+            if (mpb != null)
+            {
+                var ghost = ComponentManager<Network_Player>.Value?.BlockCreator?.selectedBlock;
+                if (ghost != null) ghostMpb = ghost.GetComponentInChildren<MeshPathBase>(true);
+            }
+            if (mpb == null || ghostMpb == null || ghostMpb.connectPoint == null)
+            {
+                if (_ropePreviewMpb != null) { ReLayZiplines(_ropePreviewMpb); _ropePreviewMpb = null; }
+                return;
+            }
+            var conns = MeshPath.PathConnections;
+            if (conns == null) return;
+            foreach (var c in conns)
+            {
+                if (c == null || !c.IsValid()) continue;
+                if (c.baseA != mpb && c.baseB != mpb) continue;
+                var other = c.baseA == mpb ? c.baseB : c.baseA;
+                ReLayPath(c.path, other.connectPoint.position, ghostMpb.connectPoint.position, withCollider: false);
+                _ropePreviewMpb = mpb;
+            }
+        }
+
+        // --- live antenna wire preview ---------------------------------------------------------
+        // Same idea as the rope preview: while a connected antenna OR a receiver is carried, its
+        // wire endpoints follow the ghost every frame. The ghost is the same prefab, so a ghost
+        // receiver carries its own sockets[] to read positions from; a ghost antenna's wire end is
+        // just ghost.transform.position (vanilla uses ant.transform.position). Rope.SetPosition
+        // only moves rope-part transforms + retiles the material (decomp Rope.cs) - per-frame safe,
+        // no mesh allocation. Park back at the real block whenever the ghost is missing or the
+        // carry ends; RefreshWires on the teleport path makes the restore idempotent.
+        private static Block _wirePreviewBlock;
+
+        internal static void UpdateWirePreview()
+        {
+            var mv = Moving;
+            Block ghost = null;
+            if (!ReferenceEquals(mv, null) && mv != null)
+                ghost = ComponentManager<Network_Player>.Value?.BlockCreator?.selectedBlock;
+            if (ghost == null)
+            {
+                if (_wirePreviewBlock != null) { RefreshWires(_wirePreviewBlock); _wirePreviewBlock = null; }
+                return;
+            }
             try
             {
-                var mp = b.GetComponentInChildren<MeshPathBase>(true);
-                if (mp == null) return false;
-                var conns = MeshPath.PathConnections;
-                if (conns != null)
-                    foreach (var c in conns)
-                        if (c != null && (c.baseA == mp || c.baseB == mp)) return true;
+                // carrying a connected ANTENNA: its wire's antenna end rides the ghost
+                var ant = mv.GetComponent<Reciever_Antenna>();
+                if (ant != null)
+                {
+                    var recv = _antRecv(ant); var wire = _antWire(ant);
+                    if (recv != null && wire != null && recv.sockets != null
+                        && ant.socketNumber >= 0 && ant.socketNumber < recv.sockets.Length)
+                    {
+                        wire.SetPosition(0, ghost.transform.position);
+                        wire.SetPosition(1, recv.sockets[ant.socketNumber].position);
+                        _wirePreviewBlock = mv;
+                    }
+                }
+                // carrying a RECEIVER: every connected antenna's socket end rides the ghost's sockets
+                var rc = mv.GetComponent<Reciever>();
+                var ghostRc = ghost.GetComponent<Reciever>();
+                if (rc != null && ghostRc != null && rc.antennas != null && ghostRc.sockets != null)
+                {
+                    foreach (var a in rc.antennas)
+                    {
+                        if (a == null) continue;
+                        var wire = _antWire(a);
+                        if (wire == null) continue;
+                        if (a.socketNumber < 0 || a.socketNumber >= ghostRc.sockets.Length) continue;
+                        wire.SetPosition(0, a.transform.position);
+                        wire.SetPosition(1, ghostRc.sockets[a.socketNumber].position);
+                        _wirePreviewBlock = mv;
+                    }
+                }
             }
-            catch { return true; } // can't tell -> safer to refuse than strand a rope
-            return false;
+            catch (System.Exception ex) { Warn($"wire preview: {ex.Message}"); }
         }
 
         // BlockCreator was INACTIVE when the move started (no hammer in hands): we enabled it for the

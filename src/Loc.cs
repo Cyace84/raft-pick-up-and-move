@@ -77,18 +77,6 @@ namespace PickUpMove
                 ["ja"]="この板は2点の間に渡されているため、運べません。",
                 ["ko"]="이 널빤지는 두 지점 사이에 걸쳐 있어 옮길 수 없습니다.", ["pl"]="Ta deska jest rozciągnięta między dwoma punktami i nie można jej przenieść." },
 
-            ["rope"] = new Dictionary<string, string> {
-                ["en"]="Detach the rope before moving the zipline.",
-                ["ru"]="Сначала снимите верёвку, потом двигайте зиплайн.",
-                ["de"]="Löse das Seil, bevor du die Seilrutsche bewegst.",
-                ["fr"]="Détachez la corde avant de déplacer la tyrolienne.",
-                ["sv"]="Ta loss repet innan du flyttar linbanan.",
-                ["it"]="Stacca la corda prima di spostare la teleferica.",
-                ["pt"]="Solte a corda antes de mover a tirolesa.",
-                ["zh"]="移动滑索前请先解开绳索。",
-                ["ja"]="ジップラインを動かす前にロープを外してください。",
-                ["ko"]="집라인을 옮기기 전에 밧줄을 먼저 분리하세요.", ["pl"]="Odłącz linę przed przeniesieniem tyrolki." },
-
             ["group"] = new Dictionary<string, string> {
                 ["en"]="Items on top only stay on the same surface type.",
                 ["ru"]="Предметы сверху сохраняются только на той же поверхности.",

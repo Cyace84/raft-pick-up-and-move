@@ -173,6 +173,7 @@ namespace PickUpMove
                                 tb.transform.localPosition = tpPos;
                                 tb.transform.localEulerAngles = tpRot;
                                 PipeLifecycle(tb, place: true);
+                                RefreshWires(tb);
                             }
                             if (mine) // our pending move completed as a teleport - un-hide the SAME object at its new spot
                             {
@@ -218,6 +219,7 @@ namespace PickUpMove
                                         var hr = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                                         _pendingClientMoveOriginal.transform.localPosition = hp;
                                         _pendingClientMoveOriginal.transform.localEulerAngles = hr;
+                                        RefreshWires(_pendingClientMoveOriginal);
                                     }
                                     catch { }
                                     RestoreHidden();

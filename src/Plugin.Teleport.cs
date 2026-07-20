@@ -183,6 +183,87 @@ namespace PickUpMove
             catch (System.Exception ex) { Warn($"pipe lifecycle ({(place ? "place" : "remove")}) '{b.name}': {ex.Message}"); }
         }
 
+        // ---- ANTENNA WIRE RE-LAY ---------------------------------------------------------
+        // Vanilla lays the reciever<->antenna wire ONCE, in Reciever_Antenna.ConnectToReciever:
+        //   wire.SetPosition(0, antenna.transform.position);
+        //   wire.SetPosition(1, reciever.sockets[antenna.socketNumber].position);
+        // World points, baked at connect (decomp Reciever_Antenna). Vanilla never moves placed
+        // blocks, so it never re-lays - move a reciever (or a table carrying one as a dep) and
+        // the wires stay at the old spot. Fix: re-issue the same two calls after every transform
+        // change (teleport apply, rollback, remote notify, probe-sync). The RECREATE path needs
+        // nothing: OnDestroy disconnects, the fresh block reconnects itself in Update.
+        private static readonly AccessTools.FieldRef<Reciever_Antenna, Rope> _antWire =
+            AccessTools.FieldRefAccess<Reciever_Antenna, Rope>("wire");
+        private static readonly AccessTools.FieldRef<Reciever_Antenna, Reciever> _antRecv =
+            AccessTools.FieldRefAccess<Reciever_Antenna, Reciever>("reciever");
+
+        internal static void RefreshWires(Block b)
+        {
+            if (b == null) return;
+            try
+            {
+                var recv = b.GetComponent<Reciever>();
+                if (recv != null && recv.antennas != null)
+                    foreach (var ant in recv.antennas) ReLayWire(ant);
+                ReLayWire(b.GetComponent<Reciever_Antenna>());
+            }
+            catch (System.Exception ex) { Warn($"antenna wire refresh '{b.name}': {ex.Message}"); }
+            try
+            {
+                foreach (var mpb in b.GetComponentsInChildren<MeshPathBase>(true)) ReLayZiplines(mpb);
+            }
+            catch (System.Exception ex) { Warn($"zipline refresh '{b.name}': {ex.Message}"); }
+        }
+
+        // Zipline rope = MeshPath: mesh + collider generated ONCE from world connectPoints
+        // (decomp MeshPath.CreateMeshPath), never refreshed - same disease as antenna wires.
+        // Re-issue vanilla's own CreatePath with the stored slack; replicating:true mutes the
+        // creation SFX. Deterministic from world positions, so every peer converges by itself.
+        internal static void ReLayZiplines(MeshPathBase mpb)
+        {
+            if (mpb == null || MeshPath.PathConnections == null) return;
+            foreach (var conn in MeshPath.PathConnections)
+            {
+                if (conn == null || !conn.IsValid()) continue;
+                if (conn.baseA != mpb && conn.baseB != mpb) continue;
+                ReLayPath(conn.path, conn.baseA.connectPoint.position, conn.baseB.connectPoint.position);
+            }
+        }
+
+        // CreatePath allocates two fresh Meshes (rope visual + ride collider) and orphans the old
+        // ones every call - fine once, a leak when the live rope preview calls it every frame.
+        // Destroy the previous meshes explicitly (they are runtime-generated, never prefab assets).
+        private static readonly AccessTools.FieldRef<MeshPath, MeshFilter> _mpMeshFilter =
+            AccessTools.FieldRefAccess<MeshPath, MeshFilter>("meshFilter");
+
+        // withCollider=false: preview mode - the ride collider would land ON the ghost's connect
+        // point and fail CanBuildBlock (red ghost, observed), so it is disabled while previewing
+        // and re-enabled by the final real re-lay.
+        internal static void ReLayPath(MeshPath path, Vector3 a, Vector3 b, bool withCollider = true)
+        {
+            if (path == null) return;
+            var mf = _mpMeshFilter(path);
+            var col = mf != null ? mf.GetComponentInChildren<MeshCollider>() : null;
+            Mesh oldVis = mf != null ? mf.sharedMesh : null;
+            Mesh oldCol = col != null ? col.sharedMesh : null;
+            path.CreatePath(a, b, path.currentSlack, replicating: true);
+            if (oldVis != null && mf.sharedMesh != oldVis) Object.Destroy(oldVis);
+            if (oldCol != null && col != null && col.sharedMesh != oldCol) Object.Destroy(oldCol);
+            if (col != null) col.enabled = withCollider;
+        }
+
+        private static void ReLayWire(Reciever_Antenna ant)
+        {
+            if (ant == null) return;
+            var recv = _antRecv(ant);
+            if (recv == null) return;                 // not connected - wire is inactive
+            var wire = _antWire(ant);
+            if (wire == null || recv.sockets == null) return;
+            if (ant.socketNumber < 0 || ant.socketNumber >= recv.sockets.Length) return;
+            wire.SetPosition(0, ant.transform.position);
+            wire.SetPosition(1, recv.sockets[ant.socketNumber].position);
+        }
+
         private static void BeginTeleport(Block b, Vector3 pos, Vector3 rot, Steamworks.CSteamID reqSender, List<Block> deps)
         {
             _tpBlock = b; _tpOldPos = b.transform.localPosition; _tpOldRot = b.transform.localEulerAngles;
@@ -206,6 +287,8 @@ namespace PickUpMove
             b.transform.localEulerAngles = rot;
             PipeLifecycle(b, place: true);
             Physics.SyncTransforms();
+            RefreshWires(b);
+            foreach (var d in _tpDeps) RefreshWires(d);
             _tpVerifyStart = Time.frameCount;
             _tpVerifyDeadlineTime = Time.realtimeSinceStartup + 6f;
             _tpVerifying = true;
@@ -247,6 +330,8 @@ namespace PickUpMove
                 _tpBlock.transform.localEulerAngles = _tpOldRot;
                 PipeLifecycle(_tpBlock, place: true);
                 Physics.SyncTransforms();
+                RefreshWires(_tpBlock);
+                foreach (var d in _tpDeps) RefreshWires(d);
                 NoteHud(Loc.T("no_support"));
                 if (_tpReqSender.IsValid()) SendMoveRefusal(_tpReqSender, _tpBlock.ObjectIndex, "no_support");
                 _tpBlock = null; _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();

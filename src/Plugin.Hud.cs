@@ -26,6 +26,8 @@ namespace PickUpMove
             // ghost previews FIRST: the hud-note branch below early-returns while a note is shown,
             // and the previews must keep following the ghost through refusal notes mid-carry.
             UpdateGhostPreviews();
+            UpdateRopePreview(); // strung zipline rope follows the carry ghost (see Plugin.Carry.cs)
+            UpdateWirePreview(); // antenna/receiver wires follow the carry ghost too
             // transient user-feedback line first: it must show even mid-carry (refusals fire then)
             if (_hudNote != null)
             {
