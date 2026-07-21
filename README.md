@@ -10,21 +10,21 @@ it one tile over.
 
 ## What it moves (keeping state)
 
-- Storage (small, medium, large, wall cabinets), items still inside.
+- Storage of any size, items still inside.
 - Cooking pot, grill, juicer, smelter, purifier: recipe, progress and slots survive.
-- Crop plots, scarecrows, beehives: plants, integrity, combs all make the trip.
+- Crop plots take the plants and their growth stage; beehives keep the combs.
 - Battery chargers, biofuel refiners and fuel tanks keep whatever's in them.
 - Pipes rewire themselves around the new spot.
-- Signs and plaques keep their text.
-- Decor, furniture, plain placeables. Anything standing on top is carried along, and the
-  placement ghost previews the whole group (live contents like batteries included), tinted
-  vanilla green/red. Paint survives.
+- The receiver keeps its frequency; antennas move on their own, wire and all.
+- Sprinklers keep their water and battery.
+- Sails, steering wheels, engines and anchors move without a rebuild.
+- Signs keep their text.
+- Decor, furniture, lights; paint stays on. Anything standing on top is carried along, and the
+  placement ghost previews the whole group (live contents like batteries and purifier water
+  included), tinted vanilla green/red.
 
-Two hard exceptions: the detail plank (its stretch mechanic doesn't survive a move) and a
-zipline with a rope attached. Detach the rope first; the mod says so in-game. If a specific
-move would lose device state (say, a filled container onto a different surface type), the mod
-refuses with an on-screen note rather than risk it. Notes show up in your game's language;
-most translations are machine-made, so corrections are welcome.
+One exception: the detail plank, whose stretch mechanic doesn't survive a move. If a move can't
+go through, a short note at the top of the screen tells you why, in your game's language.
 Nothing is ever silently dropped.
 
 ## Install
