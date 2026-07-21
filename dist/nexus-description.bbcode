@@ -13,7 +13,7 @@ It works on the things you craft and place. The raft itself is off-limits (found
 [*]Crop plots take the plants and their growth stage with them. Beehives keep the combs.
 [*]Battery chargers, biofuel refiners and fuel tanks keep whatever's in them.
 [*]Pipes rewire themselves around the new spot.
-[*]Signs and plaques keep their text.
+[*]Signs keep their text.
 [*]Decor, furniture, lights. Paint stays on.
 [/list]
 Whatever is standing on top of a moved block comes along with it. The placement ghost previews the whole group, live contents like batteries and purifier water included, tinted green or red exactly like the vanilla ghost.
@@ -35,7 +35,7 @@ Only one player at a time can be carrying a given object. If you and another pla
 A player without the mod sees the new position after rejoining, since it's saved correctly. For a clean co-op game, have everyone run the same DLL.
 
 [size=4][b]Bug reports[/b][/size]
-If something breaks I need the log. Open [font=Courier New]BepInEx/config/com.cyace84.pickupmove.cfg[/font], find the Logging section, set [font=Courier New]RelayLogs = true[/font], then reproduce the problem. Each game then writes this mod's own lines to [font=Courier New]BepInEx/PickUpMoveLogs/[/font], one file per session, and nothing else goes in there, so the files stay small.
+If something breaks I need the log. Open [font=Courier New]BepInEx/config/com.cyace84.pickupmove.cfg[/font], find the Logging section, set [font=Courier New]RelayLogs = true[/font], then reproduce the problem. Despite the name it always writes this mod's lines to a file, solo or in co-op: [font=Courier New]BepInEx/PickUpMoveLogs/[/font], one per session, and nothing else goes in there, so they stay small.
 
 For a co-op bug the host can gather everything from one place. If the client also has RelayLogs on, their lines relay to the host on their own, so the host's PickUpMoveLogs folder ends up holding both sides. Zip that folder and attach it to an issue on [url=https://github.com/Cyace84/raft-pick-up-and-move/issues]the GitHub tracker[/url], or use the Bugs tab here. Warnings and errors are recorded even with console logging off, so the report keeps them.
 
@@ -61,4 +61,4 @@ DOTNET_ROOT=$HOME/.dotnet dotnet build -c Release
 Add [font=Courier New]-p:GameDir="/path/to/Raft"[/font] if your game is not at the default path. The DLL lands in bin/Release/, copy it into BepInEx/plugins/.
 
 [size=4][b]Shout outs[/b][/size]
-Thanks to the BepInEx and HarmonyX teams for the tooling, and to the Raft modding community for the reference code I dug through while building this.
+Thanks to the BepInEx and HarmonyX teams for the tooling this is built on.
