@@ -1,0 +1,36 @@
+<Project>
+
+  <!-- Copy to Local.props (gitignored) and edit. Only needed if your paths are not the Windows
+       defaults, i.e. always on Linux/macOS (Proton/Wine/CrossOver) or for a non-default Steam
+       library. Everything here can equally be passed as -p:GameDir=... on the command line.
+
+       GameDir     folder that CONTAINS Raft_Data - used for the BepInEx build (needs BepInEx/core)
+       RmlGameDir  same, for the RML verification build; omit if one install hosts both loaders
+       RmlRoot     RaftModLoader data dir (has binaries/ and cache/publicizedAssemblies/)
+  -->
+
+  <PropertyGroup>
+
+    <!-- Windows (only if Steam is not in the default library) -->
+    <!--
+    <GameDir>D:\SteamLibrary\steamapps\common\Raft</GameDir>
+    <RmlRoot>$(APPDATA)\RaftModLoader</RmlRoot>
+    -->
+
+    <!-- Linux, Steam Proton -->
+    <!--
+    <GameDir>$(HOME)/.steam/steam/steamapps/common/Raft</GameDir>
+    <RmlRoot>$(HOME)/.steam/steam/steamapps/compatdata/648800/pfx/drive_c/users/steamuser/AppData/Roaming/RaftModLoader</RmlRoot>
+    -->
+
+    <!-- macOS, CrossOver bottles (this project is developed with BepInEx and RML in SEPARATE
+         bottles, hence the two different game dirs) -->
+    <!--
+    <GameDir>$(HOME)/Library/Application Support/CrossOver/Bottles/BEPINEX_BOTTLE/drive_c/Program Files (x86)/Steam/steamapps/common/Raft</GameDir>
+    <RmlGameDir>$(HOME)/Library/Application Support/CrossOver/Bottles/RML_BOTTLE/drive_c/Program Files (x86)/Steam/steamapps/common/Raft</RmlGameDir>
+    <RmlRoot>$(HOME)/Library/Application Support/CrossOver/Bottles/RML_BOTTLE/drive_c/users/crossover/AppData/Roaming/RaftModLoader</RmlRoot>
+    -->
+
+  </PropertyGroup>
+
+</Project>

@@ -11,3 +11,4 @@ src/BuildStamp.g.cs
 media/
 rml/obj/
 rml/bin/
+Local.props

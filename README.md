@@ -50,13 +50,28 @@ after a reload). For a clean co-op game, have everyone run the mod.
 
 ## Build from source
 
+One source tree builds for both loaders. Reference paths default to a stock Windows Steam install;
+anywhere else (Proton/Wine/CrossOver, other Steam library) copy `Local.props.example` to
+`Local.props` and set `GameDir` / `RmlRoot` — it is gitignored, so machine paths never land in the
+repo. A wrong path fails with one readable sentence, not a wall of CS0246.
+
 ```bash
-DOTNET_ROOT=$HOME/.dotnet dotnet build -c Release
-# if Raft isn't at the default path:
-#   dotnet build -c Release -p:GameDir="/path/to/Raft"
+export DOTNET_ROOT=$HOME/.dotnet
+
+# BepInEx 5 plugin -> bin/Release/PickUpMove.dll, copy to Raft/BepInEx/plugins/
+dotnet build -c Release
+
+# Raft Mod Loader package -> dist/"Pick Up & Move <ver>.rmod", copy to Raft/mods/
+./pack-rmod.sh
 ```
 
-The DLL ends up in `bin/Release/`. Copy it to `Raft/BepInEx/plugins/`.
+Everything can also be set per-invocation: `dotnet build -c Release -p:GameDir="/path/to/Raft"`.
+
+The `.rmod` ships **sources** (RML compiles mods at load time), so `pack-rmod.sh` is what produces
+the shipped artifact. `rml/PickUpMove.Rml.csproj` compiles that same file set against RML's own
+assemblies purely to catch errors at the desk instead of at a game launch — it builds nothing that
+ships. Both builds embed the git short SHA (`gen-stamp.sh`) and log it at startup, so the running
+build is always identifiable; commit before building if you want a clean stamp.
 
 ## License
 

@@ -12,8 +12,8 @@
     <!-- No deps copied; everything is provided by the game / BepInEx at runtime -->
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 
-    <!-- Absolute paths into the CrossOver "PEak" bottle. Override on CLI with -p:GameDir=... if it moves. -->
-    <GameDir Condition="'$(GameDir)' == ''">/Users/cyace84/Library/Application Support/CrossOver/Bottles/PEak/drive_c/Program Files (x86)/Steam/steamapps/common/Raft</GameDir>
+    <!-- GameDir comes from Local.props / -p:GameDir=... / Windows default - see Directory.Build.props -->
+    <NeedsBepInEx>true</NeedsBepInEx>
     <Managed>$(GameDir)/Raft_Data/Managed</Managed>
     <BepCore>$(GameDir)/BepInEx/core</BepCore>
   </PropertyGroup>

@@ -1,0 +1,30 @@
+<Project>
+
+  <!-- Shared reference-path resolution for both verification projects.
+
+       Neither project produces a shipped artifact for RML (the .rmod carries SOURCES; RML compiles
+       them at load time), and the BepInEx build is a plain DLL. All they need is a Raft install and
+       (optionally) a RaftModLoader data dir to compile against.
+
+       Resolution order, first hit wins:
+         1. -p:GameDir=... / -p:RmlRoot=... on the command line (global props beat file assignments)
+         2. Local.props in this directory  (gitignored; copy Local.props.example)
+         3. Default Windows install locations
+       Anything unresolved fails the build with an actionable message (Directory.Build.targets),
+       never with a MissingMethod/NotFound wall of CS0246. -->
+
+  <Import Project="$(MSBuildThisFileDirectory)Local.props" Condition="Exists('$(MSBuildThisFileDirectory)Local.props')" />
+
+  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
+    <GameDir Condition="'$(GameDir)' == ''">$([System.Environment]::GetFolderPath(SpecialFolder.ProgramFilesX86))\Steam\steamapps\common\Raft</GameDir>
+    <RmlRoot Condition="'$(RmlRoot)' == ''">$(APPDATA)\RaftModLoader</RmlRoot>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- The two loaders may live in different installs (e.g. separate Wine/CrossOver bottles:
+         BepInEx in one, RML in another). RmlGameDir falls back to GameDir for the common case of a
+         single install hosting both. -->
+    <RmlGameDir Condition="'$(RmlGameDir)' == ''">$(GameDir)</RmlGameDir>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,28 @@
+<Project>
+
+  <!-- Turn "reference path is wrong/unset" into one readable sentence instead of a hundred CS0246s.
+       Each project opts in by setting NeedsBepInEx / NeedsRml. -->
+
+  <Target Name="ValidateRaftRefs" BeforeTargets="ResolveAssemblyReferences">
+
+    <Error Condition="'$(GameDir)' == '' AND '$(NeedsBepInEx)' == 'true'"
+           Text="GameDir is not set. Copy Local.props.example to Local.props and set GameDir to your Raft install, or pass -p:GameDir=&quot;/path/to/Raft&quot;." />
+    <Error Condition="'$(RmlGameDir)' == '' AND '$(NeedsRml)' == 'true'"
+           Text="RmlGameDir/GameDir is not set. Copy Local.props.example to Local.props, or pass -p:RmlGameDir=&quot;/path/to/Raft&quot;." />
+    <Error Condition="'$(RmlRoot)' == '' AND '$(NeedsRml)' == 'true'"
+           Text="RmlRoot is not set. Copy Local.props.example to Local.props, or pass -p:RmlRoot=&quot;/path/to/AppData/Roaming/RaftModLoader&quot;." />
+
+    <Error Condition="'$(Managed)' != '' AND !Exists('$(Managed)/UnityEngine.dll')"
+           Text="No Raft assemblies at '$(Managed)'. Point GameDir/RmlGameDir at the folder that CONTAINS Raft_Data (see Local.props.example)." />
+
+    <Error Condition="'$(NeedsBepInEx)' == 'true' AND !Exists('$(BepCore)/BepInEx.dll')"
+           Text="BepInEx not found at '$(BepCore)'. Install BepInEx 5 (Mono) into that Raft install, or build only the RML project (rml/PickUpMove.Rml.csproj)." />
+
+    <Error Condition="'$(NeedsRml)' == 'true' AND !Exists('$(RmlRoot)/binaries/HMLCoreLibrary.dll')"
+           Text="RaftModLoader binaries not found at '$(RmlRoot)/binaries'. Run the Raft Mod Loader once so it populates its data dir, then rebuild." />
+    <Error Condition="'$(NeedsRml)' == 'true' AND !Exists('$(RmlRoot)/cache/publicizedAssemblies/Assembly-CSharp.dll')"
+           Text="RML's publicized assemblies are missing at '$(RmlRoot)/cache/publicizedAssemblies'. Launch the game through the Raft Mod Loader once (it generates them), then rebuild." />
+
+  </Target>
+
+</Project>
