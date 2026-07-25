@@ -127,6 +127,7 @@ namespace PickUpMove
     [HarmonyPatch(typeof(Storage_Small), nameof(Storage_Small.OnIsRayed))]
     internal static class Patch_StorageMoveHint
     {
+        [HarmonyPostfix]
         private static void Postfix(Storage_Small __instance)
         {
             try
@@ -156,6 +157,11 @@ namespace PickUpMove
         private static readonly HashSet<int> _nreLogged = new HashSet<int>();
         private static System.Reflection.FieldInfo _fCanvas, _fNetwork, _fStorageMgr;
 
+        // Explicit attribute: name-based detection SHOULD work (RML 0Harmony AttributePatch.GetPatchType
+        // matches the literal method name) but the 20:00 repro ran with the finalizer present in the
+        // compiled assembly, PatchAll reporting no error, and the NRE still escaping - so the one
+        // unverified link (name detection) is now removed rather than trusted.
+        [HarmonyFinalizer]
         private static System.Exception Finalizer(System.Exception __exception, Storage_Small __instance)
         {
             if (__exception == null) return null;

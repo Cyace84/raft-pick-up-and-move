@@ -98,6 +98,19 @@ namespace PickUpMove
             // the game's raycast system, independent of our Update; patches persist past Awake.
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Warn("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
+            // Self-verification (storage-onisrayed recon): the 20:00 repro had the finalizer IN the
+            // compiled assembly and PatchAll reporting no error, yet the NRE still escaped the patched
+            // method. Whether a patch is live must be a LOG LINE, not an inference from decompiles.
+            try
+            {
+                var m = HarmonyLib.AccessTools.Method(typeof(Storage_Small), "OnIsRayed");
+                var pi = Harmony.GetPatchInfo(m);
+                Announce("patch check: OnIsRayed prefixes=" + (pi?.Prefixes?.Count ?? 0)
+                    + " postfixes=" + (pi?.Postfixes?.Count ?? 0)
+                    + " finalizers=" + (pi?.Finalizers?.Count ?? 0)
+                    + " owners=[" + (pi != null ? string.Join(",", System.Linq.Enumerable.ToArray(pi.Owners)) : "") + "]");
+            }
+            catch (System.Exception ex) { Warn("patch check failed: " + ex.Message); }
 
             Announce($"{VersionText} (build {BuildStamp.Value}) loaded. Move key = {MoveKeyMain()}.");
         }
