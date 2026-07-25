@@ -42,10 +42,11 @@ namespace PickUpMove
                 "Logging",
                 "RelayLogs",
                 false,
-                "Debug aid, off by default. Write this mod's lines to per-session files " +
-                "(BepInEx/PickUpMoveLogs/) and, when playing as a client, relay them to the host so a " +
-                "co-op issue can be diagnosed from one machine. Sends this mod's own lines plus the " +
-                "game's errors/exceptions and block/storage lookup failures - nothing else.");
+                "Debug aid, off by default. When playing as a client, relay this mod's log lines to " +
+                "the host over Steam P2P so a co-op issue can be diagnosed from one machine. Sends this " +
+                "mod's own lines plus the game's errors/exceptions and block/storage lookup failures - " +
+                "nothing else. Per-session files (BepInEx/PickUpMoveLogs/) are always written locally " +
+                "regardless of this setting.");
 
             // ---- host contract ----
             LogSink = (lvl, msg) => Log?.Log(ToBepInEx(lvl), msg);

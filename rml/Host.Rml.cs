@@ -75,8 +75,9 @@ namespace PickUpMove
                             "# verbose: show this mod's diagnostic lines in the game log. Warnings and\n" +
                             "# errors always show regardless.\n" +
                             "verbose=false\n" +
-                            "# relay: write per-session log files here and, as a client, relay them to\n" +
-                            "# the host, so a co-op issue can be read off one machine.\n" +
+                            "# relay: as a client, send this mod's log lines to the host over Steam P2P\n" +
+                            "# so a co-op issue can be read off one machine. Per-session log files are\n" +
+                            "# always written here regardless of this setting.\n" +
                             "relay=false\n");
                         return s;
                     }
