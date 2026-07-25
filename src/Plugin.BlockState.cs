@@ -1,8 +1,5 @@
 using System.Collections.Generic;
 using System.IO;
-using BepInEx;
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
 
@@ -569,16 +566,18 @@ namespace PickUpMove
 
         private static byte[] BuildPaintPayload(uint idx, Paint p)
         {
-            using var ms = new MemoryStream();
-            using var w = new BinaryWriter(ms);
-            w.Write(MoveMagic); w.Write((byte)9); w.Write(idx);
-            w.Write(p.cA != null ? p.cA.uniqueColorIndex : NoColor);
-            w.Write(p.pcA != null ? p.pcA.uniqueColorIndex : NoColor);
-            w.Write(p.pi1);
-            w.Write(p.cB != null ? p.cB.uniqueColorIndex : NoColor);
-            w.Write(p.pcB != null ? p.pcB.uniqueColorIndex : NoColor);
-            w.Write(p.pi2);
-            return ms.ToArray();
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms))
+            {
+                w.Write(MoveMagic); w.Write((byte)9); w.Write(idx);
+                w.Write(p.cA != null ? p.cA.uniqueColorIndex : NoColor);
+                w.Write(p.pcA != null ? p.pcA.uniqueColorIndex : NoColor);
+                w.Write(p.pi1);
+                w.Write(p.cB != null ? p.cB.uniqueColorIndex : NoColor);
+                w.Write(p.pcB != null ? p.pcB.uniqueColorIndex : NoColor);
+                w.Write(p.pi2);
+                return ms.ToArray();
+            }
         }
 
         // Host -> every known peer; client -> host (which re-broadcasts to the others on receive).

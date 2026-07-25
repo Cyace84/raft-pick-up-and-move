@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Verification-only project. It is NOT how the mod ships: RML compiles the .rmod's sources
+       itself at load time. This builds exactly the file set that pack-rmod.sh puts in the archive,
+       against the Raft Mod Loader's own assemblies, so a broken RML build is caught here in a
+       second instead of costing a game launch. Nothing here produces a shipped artifact. -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>PickUpMove.RmlCheck</AssemblyName>
+    <RootNamespace>PickUpMove</RootNamespace>
+    <LangVersion>7.3</LangVersion>            <!-- keep the sources loader-agnostic -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>obj/rmlcheck/</OutputPath>
+
+    <SteamBottle Condition="'$(SteamBottle)' == ''">/Users/cyace84/Library/Application Support/CrossOver/Bottles/Steam/drive_c</SteamBottle>
+    <RmlRoot>$(SteamBottle)/users/crossover/AppData/Roaming/RaftModLoader</RmlRoot>
+    <Managed>$(SteamBottle)/Program Files (x86)/Steam/steamapps/common/Raft/Raft_Data/Managed</Managed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- exactly what ships in the .rmod: shared logic + the RML host, never the BepInEx host -->
+    <Compile Include="../src/*.cs" />
+    <Compile Include="Host.Rml.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- RML's own binaries: HMLLibrary.Mod lives here, and mods are compiled against the loader's
+         publicized Assembly-CSharp, not the raw one -->
+    <Reference Include="HMLCoreLibrary"><HintPath>$(RmlRoot)/binaries/HMLCoreLibrary.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(RmlRoot)/binaries/0Harmony.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>$(RmlRoot)/cache/publicizedAssemblies/Assembly-CSharp.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="com.rlabrecque.steamworks.net"><HintPath>$(RmlRoot)/cache/publicizedAssemblies/com.rlabrecque.steamworks.net.dll</HintPath><Private>false</Private></Reference>
+
+    <Reference Include="UnityEngine"><HintPath>$(Managed)/UnityEngine.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(Managed)/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(Managed)/UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UIModule"><HintPath>$(Managed)/UnityEngine.UIModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UI"><HintPath>$(Managed)/UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.TextRenderingModule"><HintPath>$(Managed)/UnityEngine.TextRenderingModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(Managed)/UnityEngine.InputLegacyModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.InputSystem"><HintPath>$(Managed)/Unity.InputSystem.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+</Project>

@@ -1,8 +1,5 @@
 using System.Collections.Generic;
 using System.IO;
-using BepInEx;
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
 
@@ -76,7 +73,7 @@ namespace PickUpMove
             if (dtm == null) return;
             // ADD our line at index 1 WITHOUT clearing - keeps the game's 'X' remove/pickup prompt at
             // index 0 and stacks 'M Move' under it (same slot the storage postfix uses).
-            dtm.ShowText(Loc.T("move"), MoveKey.Value.MainKey, 1, 0, false);
+            dtm.ShowText(Loc.T("move"), MoveKeyMain(), 1, 0, false);
             _hintShown = true;
         }
         // One legacy-uGUI Text ABOVE the vanilla bottom-prompt row, styled from the prompt font.
@@ -139,7 +136,7 @@ namespace PickUpMove
                 if (__instance == null || __instance.IsOpen) return;    // chest is open
                 var dtm = ComponentManager<DisplayTextManager>.Value;
                 if (dtm == null) return;
-                dtm.ShowText(Loc.T("move"), Plugin.MoveKey.Value.MainKey, 1, 0, false);
+                dtm.ShowText(Loc.T("move"), Plugin.MoveKeyMain(), 1, 0, false);
             }
             catch { }
         }

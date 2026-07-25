@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using BepInEx;
-using BepInEx.Logging;
 using UnityEngine;
 
 namespace PickUpMove
@@ -35,7 +33,7 @@ namespace PickUpMove
             _enabled = enabled;
             if (!_enabled) return;
             _stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-            _dir = Path.Combine(Paths.BepInExRootPath, "PickUpMoveLogs");
+            _dir = Plugin.LogDir;   // host-provided (BepInEx/PickUpMoveLogs or the RML ModData folder)
             try { Directory.CreateDirectory(_dir); } catch { }
             // Vanilla-log tap. The 07-13 zombie-chest incident was undiagnosable because the
             // client's BepInEx config captured no Unity-source lines at all: the game's own
@@ -79,7 +77,7 @@ namespace PickUpMove
                 if (condition == _lastUnityLine && now - _lastUnityTime < 5f) { _unityRepeats++; return; }
                 if (_unityRepeats > 0)
                 {
-                    Record(LogLevel.Debug, $"[unity] last line repeated {_unityRepeats} more time(s)");
+                    Record(PumLevel.Debug, $"[unity] last line repeated {_unityRepeats} more time(s)");
                     _unityRepeats = 0;
                 }
                 _lastUnityLine = condition; _lastUnityTime = now;
@@ -95,14 +93,14 @@ namespace PickUpMove
                     if (top.Length > 400) top = top.Substring(0, 400);
                     line += " | " + top.Replace('\n', ';');
                 }
-                Record(LogLevel.Info, line);
+                Record(PumLevel.Info, line);
             }
             catch { }
         }
 
         // Fed directly by Plugin.Emit (no BepInEx log-bus hook), so the file/relay sink is INDEPENDENT
         // of whether lines also go to the console. No-op unless RelayLogs enabled this session.
-        internal static void Record(LogLevel level, string data)
+        internal static void Record(PumLevel level, string data)
         {
             if (!_enabled) return;
             try
@@ -160,13 +158,15 @@ namespace PickUpMove
             }
             try
             {
-                using var ms = new MemoryStream();
-                using var w = new BinaryWriter(ms);
-                w.Write(Magic); w.Write(TypeBatch); w.Write((ushort)lines.Count);
-                foreach (var l in lines) w.Write(l);
-                var data = ms.ToArray();
-                Steamworks.SteamNetworking.SendP2PPacket(host, data, (uint)data.Length,
-                    Steamworks.EP2PSend.k_EP2PSendReliable, Channel);
+                using (var ms = new MemoryStream())
+                using (var w = new BinaryWriter(ms))
+                {
+                    w.Write(Magic); w.Write(TypeBatch); w.Write((ushort)lines.Count);
+                    foreach (var l in lines) w.Write(l);
+                    var data = ms.ToArray();
+                    Steamworks.SteamNetworking.SendP2PPacket(host, data, (uint)data.Length,
+                        Steamworks.EP2PSend.k_EP2PSendReliable, Channel);
+                }
             }
             catch { }
         }
@@ -180,13 +180,15 @@ namespace PickUpMove
                 Plugin.RegisterPeer(sender); // relay batches double as a live roster of real Steam ids
                 try
                 {
-                    using var r = new BinaryReader(new MemoryStream(buf));
-                    if (r.ReadUInt32() != Magic || r.ReadByte() != TypeBatch) continue;
-                    int n = r.ReadUInt16();
-                    if (_clientFile == null) _clientFile = OpenWriter($"client-{_stamp}.log");
-                    string tag = (sender.m_SteamID % 100000).ToString();
-                    for (int i = 0; i < n && i < 200; i++)
-                        _clientFile?.WriteLine($"[recv {DateTime.Now:HH:mm:ss}] [{tag}] {r.ReadString()}");
+                    using (var r = new BinaryReader(new MemoryStream(buf)))
+                    {
+                        if (r.ReadUInt32() != Magic || r.ReadByte() != TypeBatch) continue;
+                        int n = r.ReadUInt16();
+                        if (_clientFile == null) _clientFile = OpenWriter($"client-{_stamp}.log");
+                        string tag = (sender.m_SteamID % 100000).ToString();
+                        for (int i = 0; i < n && i < 200; i++)
+                            _clientFile?.WriteLine($"[recv {DateTime.Now:HH:mm:ss}] [{tag}] {r.ReadString()}");
+                    }
                 }
                 catch { }
             }

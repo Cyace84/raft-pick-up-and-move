@@ -1,8 +1,5 @@
 using System.Collections.Generic;
 using System.IO;
-using BepInEx;
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
 
@@ -130,7 +127,7 @@ namespace PickUpMove
                     if (!Steamworks.SteamNetworking.ReadP2PPacket(buf, size, out uint _, out Steamworks.CSteamID _, MoveChannel)) break;
                     try
                     {
-                        using var r = new BinaryReader(new MemoryStream(buf));
+                        var r = new BinaryReader(new MemoryStream(buf));
                         if (r.ReadUInt32() != MoveMagic) continue;
                         byte kind = r.ReadByte();
                         uint origIndex = r.ReadUInt32();
@@ -299,7 +296,7 @@ namespace PickUpMove
                 var np = ComponentManager<Network_Player>.Value;
                 var hostId = np?.Network != null ? np.Network.CurrentSteamHost : default;
                 if (!hostId.IsValid()) return;
-                using var ms = new MemoryStream(); using var w = new BinaryWriter(ms);
+                var ms = new MemoryStream(); var w = new BinaryWriter(ms);
                 w.Write(MoveMagic); w.Write(kind); w.Write(idx);
                 QueueModSend(hostId, ms.ToArray());
             }
@@ -322,7 +319,7 @@ namespace PickUpMove
         {
             try
             {
-                using var ms = new MemoryStream(); using var w = new BinaryWriter(ms);
+                var ms = new MemoryStream(); var w = new BinaryWriter(ms);
                 w.Write(MoveMagic); w.Write((byte)13); w.Write(idx);
                 w.Write((byte)(claimed ? 1 : 0)); w.Write(owner);
                 var data = ms.ToArray();
@@ -360,7 +357,10 @@ namespace PickUpMove
                 List<uint> drop = null;
                 foreach (var kv in _claims)
                     if (kv.Value.Owner != self && now - kv.Value.At > ClaimTtl)
-                        (drop ??= new List<uint>()).Add(kv.Key);
+                    {
+                        if (drop == null) drop = new List<uint>();
+                        drop.Add(kv.Key);
+                    }
                 if (drop != null) foreach (var i in drop) { Note($"[t] claim on #{i} expired (carrier silent {ClaimTtl:F0}s)"); HostReleaseClaim(i); }
             }
         }
@@ -401,8 +401,8 @@ namespace PickUpMove
         private static void SendMoveDone(Steamworks.CSteamID to, uint origIndex, uint newIndex)
         {
             if (!to.IsValid()) return;
-            using var ms = new MemoryStream();
-            using var w = new BinaryWriter(ms);
+            var ms = new MemoryStream();
+            var w = new BinaryWriter(ms);
             w.Write(MoveMagic); w.Write((byte)10); w.Write(origIndex); w.Write(newIndex);
             QueueModSend(to, ms.ToArray());
         }
@@ -427,8 +427,8 @@ namespace PickUpMove
                 var net = ComponentManager<Raft_Network>.Value;
                 var host = net != null ? net.CurrentSteamHost : default;
                 if (!host.IsValid()) return;
-                using var ms = new MemoryStream();
-                using var w = new BinaryWriter(ms);
+                var ms = new MemoryStream();
+                var w = new BinaryWriter(ms);
                 w.Write(MoveMagic); w.Write((byte)8); w.Write(0u); // kind 8 = hello
                 var data = ms.ToArray();
                 Steamworks.SteamNetworking.SendP2PPacket(host, data, (uint)data.Length,
@@ -450,7 +450,7 @@ namespace PickUpMove
                     byte kind; uint idx;
                     try
                     {
-                        using var r = new BinaryReader(new MemoryStream(buf));
+                        var r = new BinaryReader(new MemoryStream(buf));
                         if (r.ReadUInt32() != MoveMagic) continue;
                         kind = r.ReadByte(); idx = r.ReadUInt32();
                     }
@@ -480,7 +480,7 @@ namespace PickUpMove
                             if (_claims.TryGetValue(idx, out var cl) && cl.Owner != sender.m_SteamID)
                             {
                                 // taken - tear the optimistic carry down on the loser
-                                using var msD = new MemoryStream(); using var wD = new BinaryWriter(msD);
+                                var msD = new MemoryStream(); var wD = new BinaryWriter(msD);
                                 wD.Write(MoveMagic); wD.Write((byte)14); wD.Write(idx);
                                 QueueModSend(sender, msD.ToArray());
                             }
@@ -534,8 +534,8 @@ namespace PickUpMove
                             {
                                 try
                                 {
-                                    using var ms = new MemoryStream();
-                                    using var w = new BinaryWriter(ms);
+                                    var ms = new MemoryStream();
+                                    var w = new BinaryWriter(ms);
                                     w.Write(MoveMagic); w.Write((byte)6); w.Write(idx); w.Write((byte)1);
                                     var pp = pb.transform.localPosition; var pr = pb.transform.localEulerAngles;
                                     w.Write(pp.x); w.Write(pp.y); w.Write(pp.z);
@@ -571,7 +571,7 @@ namespace PickUpMove
             uint origIndex; Vector3 pos, rot; DPS dps;
             try
             {
-                using var r = new BinaryReader(new MemoryStream(buf));
+                var r = new BinaryReader(new MemoryStream(buf));
                 if (r.ReadUInt32() != MoveMagic || r.ReadByte() != 1) return;
                 origIndex = r.ReadUInt32();
                 pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());

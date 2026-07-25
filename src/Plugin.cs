@@ -1,8 +1,4 @@
 using System.Collections.Generic;
-using System.IO;
-using BepInEx;
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
 
@@ -13,18 +9,20 @@ namespace PickUpMove
     // into placement mode (ghost follows the cursor); left-click drops it at the new location with
     // its inventory intact; press the hotkey again (or right-click) to cancel.
     //
-    // ARCHITECTURE NOTE (learned from runtime diagnostics in this BepInEx 5 + Wine/CrossOver setup):
-    //   * BaseUnityPlugin.Update() is NOT pumped here, and the plugin component gets Destroyed a few
-    //     seconds after Awake (which would also rip any Harmony patches via UnpatchSelf).
+    // ARCHITECTURE NOTE (learned from runtime diagnostics in the BepInEx 5 + Wine/CrossOver setup):
+    //   * The host plugin component's Update() is NOT pumped there, and the component itself gets
+    //     Destroyed a few seconds after Awake (which would also rip any Harmony patches).
     //   * Therefore ALL per-frame logic lives on our own DontDestroyOnLoad `Ticker` GameObject.
     //     Placement is handled by reading the vanilla ghost (BlockCreator.selectedBlock) directly on
     //     left-click. Vanilla cannot double-place the chest because the storage item is not in the
     //     player's inventory while it is being carried.
     //   * ONE Harmony postfix is used, on Storage_Small.OnIsRayed, only to draw the "Move" key hint
-    //     under the vanilla "Open" prompt. This is safe in this env: the patch is invoked by the
+    //     under the vanilla "Open" prompt. This is safe in that env: the patch is invoked by the
     //     game's own (pumped) raycast system, not our Update, and Harmony detours live in the global
-    //     patch registry - BaseUnityPlugin has no OnDestroy/UnpatchSelf (verified by decompile), so
-    //     the plugin component being destroyed after Awake does NOT remove them.
+    //     patch registry - the host plugin base class has no OnDestroy/UnpatchSelf (verified by
+    //     decompile), so the component being destroyed after Awake does NOT remove them.
+    //   * The same layout is what makes the mod portable: nothing that matters hangs off the host
+    //     component, so swapping BepInEx for the Raft Mod Loader is a matter of swapping one file.
     //
     // Recon basis (verified by decompiling Assembly-CSharp.dll):
     //   Storage_Small : Block          GetInventoryReference() : Inventory
@@ -49,52 +47,43 @@ namespace PickUpMove
     //   Plugin.Teleport.cs    same-variant teleport move + pipe lifecycle replay
     //   Plugin.Net.cs         move-channel protocol: requests, host verify, refusals, probes
 
-    [BepInPlugin(Guid, "Pick Up & Move", "1.0.0")]
-    public partial class Plugin : BaseUnityPlugin
+    // Severity, ours. Deliberately NOT BepInEx's LogLevel: that one is [Flags] with severity
+    // DECREASING as the value grows (Fatal=1, Error=2, Warning=4, Message=8, Info=16, Debug=32),
+    // so the natural-looking `lvl >= Warning` filter was silently inverted - it printed the Info /
+    // Debug chatter it was meant to hide and swallowed Error, the one line a bug report needs.
+    // Ordered by severity here, so the filter in Emit means what it reads.
+    internal enum PumLevel { Debug = 0, Info = 1, Warning = 2, Error = 3 }
+
+    public partial class Plugin
     {
         public const string Guid = "com.cyace84.pickupmove";
 
-        public static ConfigEntry<KeyboardShortcut> MoveKey;
-        public static ConfigEntry<bool> RelayLogs;
-        public static ConfigEntry<bool> LogToConsole;
-        public static ManualLogSource Log;
+        // ---- host contract ---------------------------------------------------------------------
+        // The mod runs under two loaders: BepInEx (src/hosts/Host.BepInEx.cs) and Raft Mod Loader
+        // (rml/Host.Rml.cs). Every loader-specific capability is funnelled through the five members
+        // below, which a host fills in before calling InitCommon(). Nothing else in the mod may
+        // touch a loader API - that is what keeps one source tree shippable to both.
+        internal static System.Action<PumLevel, string> LogSink; // loader console / log file
+        internal static System.Func<bool> MoveKeyDown;           // hotkey went down this frame
+        internal static System.Func<KeyCode> MoveKeyMain;        // key to draw in the HUD hint
+        internal static string LogDir;                           // where LogRelay writes sessions
+        internal static string VersionText;                      // '<name> <version>' for the banner
+        // Unpatching is the one Harmony call with no portable spelling: BepInEx ships HarmonyX,
+        // whose instance UnpatchAll(id) is [Obsolete(error: true)] in favour of a static UnpatchID,
+        // while RML ships stock Lib.Harmony, which has the instance method and no UnpatchID at all.
+        // Each host spells it its own way against the shared _harmony instance.
+        internal static System.Action UnpatchSelf;
 
-        private Harmony _harmony;
+        private static Harmony _harmony;
         private static GameObject _tickerGo;
 
-        private void Awake()
+        // Shared startup. Called by each host once its contract members are filled in.
+        internal static void InitCommon()
         {
-            Log = Logger;
-            MoveKey = Config.Bind(
-                "General",
-                "MoveStorageKey",
-                new KeyboardShortcut(KeyCode.M),
-                "Aim at a storage and press this to pick it up (with its contents) into placement mode. " +
-                "Left-click to drop it at the new spot. Press the key again or right-click to cancel.");
-
-            LogToConsole = Config.Bind(
-                "Logging",
-                "LogToConsole",
-                false,
-                "Show this mod's diagnostic lines in the BepInEx console / LogOutput.log. Off by default " +
-                "for a quiet game; turn on to watch what the mod is doing. Warnings and errors always show, " +
-                "and the one load line (with the build stamp) always shows.");
-            LogConsole = LogToConsole.Value;
-
-            RelayLogs = Config.Bind(
-                "Logging",
-                "RelayLogs",
-                false,
-                "Debug aid, off by default. Write this mod's lines to per-session files " +
-                "(BepInEx/PickUpMoveLogs/) and, when playing as a client, relay them to the host so a " +
-                "co-op issue can be diagnosed from one machine. Sends this mod's own lines plus the " +
-                "game's errors/exceptions and block/storage lookup failures - nothing else.");
-            LogRelay.Init(RelayLogs.Value);
-
-            // Own DontDestroyOnLoad ticker: BaseUnityPlugin.Update is not pumped in this env and the
-            // plugin component gets destroyed shortly after Awake.
+            // Own DontDestroyOnLoad ticker: the host plugin component's Update is not pumped in this
+            // env and the component itself gets destroyed shortly after Awake.
             var go = new GameObject("RMS_Ticker");
-            DontDestroyOnLoad(go);
+            UnityEngine.Object.DontDestroyOnLoad(go);
             go.hideFlags = HideFlags.HideAndDontSave;
             go.AddComponent<Ticker>();
             _tickerGo = go;
@@ -110,7 +99,7 @@ namespace PickUpMove
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Warn("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
 
-            Announce($"{Info.Metadata.Name} {Info.Metadata.Version} (build {BuildStamp.Value}) loaded. Move key = {MoveKey.Value}.");
+            Announce($"{VersionText} (build {BuildStamp.Value}) loaded. Move key = {MoveKeyMain()}.");
         }
 
         // Reload-safe teardown for MonoLab.Hot.Reload (dev only): drop our ticker, remove the Harmony
@@ -123,7 +112,7 @@ namespace PickUpMove
 
         public static void __MonoLabUnload()
         {
-            try { Harmony.UnpatchID(Guid); } catch { }
+            try { UnpatchSelf?.Invoke(); } catch { }
             try { UnityEngine.SceneManagement.SceneManager.sceneLoaded -= OnSceneLoaded; } catch { }
             // Destroy EVERY ticker we (or an older hot-reloaded copy) ever spawned. The ticker is
             // HideAndDontSave, which FindObjectsOfType misses - Resources.FindObjectsOfTypeAll sees it.
@@ -155,19 +144,19 @@ namespace PickUpMove
         //   relay   (RelayLogs)     -> per-session files + client->host relay (see LogRelay). Off by default.
         // Note/Trace/Warn/Err all funnel through Emit; nothing else in the mod touches Log directly
         // (except Announce, the one always-on load banner that build-stamp verification reads back).
-        internal static bool LogConsole;   // = LogToConsole.Value, set in Awake
-        internal static void Note(string msg)  => Emit(LogLevel.Info, msg);
-        internal static void Trace(string msg) => Emit(LogLevel.Debug, msg);
-        internal static void Warn(string msg)  => Emit(LogLevel.Warning, msg);
-        internal static void Err(string msg)   => Emit(LogLevel.Error, msg);
-        private static void Emit(LogLevel lvl, string msg)
+        internal static bool LogConsole;   // set by the host from its own config
+        internal static void Note(string msg)  => Emit(PumLevel.Info, msg);
+        internal static void Trace(string msg) => Emit(PumLevel.Debug, msg);
+        internal static void Warn(string msg)  => Emit(PumLevel.Warning, msg);
+        internal static void Err(string msg)   => Emit(PumLevel.Error, msg);
+        private static void Emit(PumLevel lvl, string msg)
         {
-            if (LogConsole || lvl >= LogLevel.Warning) Log?.Log(lvl, msg);
+            if (LogConsole || lvl >= PumLevel.Warning) LogSink?.Invoke(lvl, msg);
             LogRelay.Record(lvl, msg);
         }
         // Always visible regardless of LogToConsole: the single load line (raft-ship reads the build
         // stamp back from it) and anything a supporter must see even in a quiet install.
-        internal static void Announce(string msg) { Log?.Log(LogLevel.Info, msg); LogRelay.Record(LogLevel.Info, msg); }
+        internal static void Announce(string msg) { LogSink?.Invoke(PumLevel.Info, msg); LogRelay.Record(PumLevel.Info, msg); }
         internal static void NoteHud(string msg)
         {
             Note(msg); // log part gated by LogToConsole; the HUD line below is player feedback, never gated
@@ -204,7 +193,7 @@ namespace PickUpMove
                 return;
             }
 
-            if (MoveKey.Value.IsDown())
+            if (MoveKeyDown())
             {
                 if (Moving != null) CancelMove();
                 // Don't start a new move while the previous one is still resolving: the hide-bookkeeping

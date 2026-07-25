@@ -1,8 +1,5 @@
 using System.Collections.Generic;
 using System.IO;
-using BepInEx;
-using BepInEx.Configuration;
-using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
 
@@ -64,8 +61,8 @@ namespace PickUpMove
 
         private static byte[] BuildTeleportPayload(uint idx, Vector3 pos, Vector3 rot)
         {
-            using var ms = new MemoryStream();
-            using var w = new BinaryWriter(ms);
+            var ms = new MemoryStream();
+            var w = new BinaryWriter(ms);
             w.Write(MoveMagic); w.Write((byte)7); w.Write(idx);
             w.Write(pos.x); w.Write(pos.y); w.Write(pos.z);
             w.Write(rot.x); w.Write(rot.y); w.Write(rot.z);

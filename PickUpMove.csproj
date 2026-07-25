@@ -43,6 +43,12 @@
     <Reference Include="Unity.InputSystem"><HintPath>$(Managed)/Unity.InputSystem.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- rml/ is the Raft Mod Loader entry point. It ships as SOURCE inside the .rmod and must never
+         be compiled into the BepInEx assembly (it references HMLLibrary, which only exists there). -->
+    <Compile Remove="rml/**" />
+  </ItemGroup>
+
   <Target Name="GenBuildStamp" BeforeTargets="BeforeBuild">
     <Exec Command="bash gen-stamp.sh" WorkingDirectory="$(ProjectDir)" />
   </Target>
