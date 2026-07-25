@@ -26,12 +26,17 @@ namespace PickUpMove
         private static StreamWriter _clientFile;  // host only: relayed client lines
         private static string _dir, _stamp;
         private static float _nextFlush;
-        private static bool _enabled;
+        private static bool _enabled;   // network relay only; the LOCAL file is unconditional
 
+        // The local per-session file is NOT gated on 'enabled' any more. The storage-onisrayed
+        // incident (2026-07-25) was undiagnosable precisely because the RML host ran with
+        // relay=false and this class then wrote NOTHING to disk - mods/ModData/pickupmove/ held
+        // only settings.txt while Player.log rotated the evidence away. 'enabled' now gates the
+        // Steam P2P relay alone; breadcrumbs always land locally (error-filtered + spam-guarded,
+        // a few KB per session).
         internal static void Init(bool enabled)
         {
             _enabled = enabled;
-            if (!_enabled) return;
             _stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
             _dir = Plugin.LogDir;   // host-provided (BepInEx/PickUpMoveLogs or the RML ModData folder)
             try { Directory.CreateDirectory(_dir); } catch { }
@@ -61,7 +66,6 @@ namespace PickUpMove
 
         private static void OnUnityLog(string condition, string stackTrace, LogType type)
         {
-            if (!_enabled) return;
             try
             {
                 bool always = type == LogType.Exception || type == LogType.Error || type == LogType.Assert;
@@ -102,13 +106,12 @@ namespace PickUpMove
         // of whether lines also go to the console. No-op unless RelayLogs enabled this session.
         internal static void Record(PumLevel level, string data)
         {
-            if (!_enabled) return;
             try
             {
                 var line = $"[{DateTime.Now:HH:mm:ss}] [{level,-7}] {data}";
                 if (_selfFile == null) _selfFile = OpenWriter($"self-{_stamp}.log");
                 _selfFile?.WriteLine(line);
-                if (_outbox.Count < MaxQueued) _outbox.Enqueue(line); // role decided at flush time
+                if (_enabled && _outbox.Count < MaxQueued) _outbox.Enqueue(line); // relay only when opted in
             }
             catch { }
         }

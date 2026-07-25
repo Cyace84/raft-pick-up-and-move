@@ -140,5 +140,71 @@ namespace PickUpMove
             }
             catch { }
         }
+
+        // --- NRE self-diagnosis + self-heal (storage-onisrayed recon) ------------------------------
+        // Observed once (RML host, mod loaded MID-SESSION into a running world): the VANILLA body of
+        // OnIsRayed throws NRE every hovered frame - 1721 identical stacks, a lag storm because RML
+        // mirrors Unity errors on screen. Which reference is null was never captured (the log rotated
+        // away), so this finalizer makes the next occurrence self-documenting: it logs the null-map of
+        // every candidate ONCE per storage, re-seeds the three fields that are mere caches of globals
+        // (canvas/network from ComponentManager<T>.Value, storageManager from Network_Player - the
+        // exact sources OnFinishedPlacement and OnIsRayed's own self-heal branch use, decompile
+        // Storage_Small.cs), and suppresses the throw so one broken chest can't storm the log again.
+        // Finalizer-by-name is recognized by both loaders (RML PatchTools.cs:86-95 falls back to
+        // GetMethod("Finalizer"); returning null suppresses - MethodPatcher emits Ldloc __exception;
+        // Brfalse <skip> after finalizers, verified on both 0Harmony.dll copies).
+        private static readonly HashSet<int> _nreLogged = new HashSet<int>();
+        private static System.Reflection.FieldInfo _fCanvas, _fNetwork, _fStorageMgr;
+
+        private static System.Exception Finalizer(System.Exception __exception, Storage_Small __instance)
+        {
+            if (__exception == null) return null;
+            try
+            {
+                if (_fCanvas == null)
+                {
+                    _fCanvas = AccessTools.Field(typeof(Storage_Small), "canvas");
+                    _fNetwork = AccessTools.Field(typeof(Storage_Small), "network");
+                    _fStorageMgr = AccessTools.Field(typeof(Storage_Small), "storageManager");
+                }
+                var canvas = __instance != null ? _fCanvas?.GetValue(__instance) as CanvasHelper : null;
+                var network = __instance != null ? _fNetwork?.GetValue(__instance) as Raft_Network : null;
+                var smgr = __instance != null ? _fStorageMgr?.GetValue(__instance) as StorageManager : null;
+
+                bool healed = false;
+                if (__instance != null)
+                {
+                    if (canvas == null && ComponentManager<CanvasHelper>.Value != null)
+                    { _fCanvas?.SetValue(__instance, ComponentManager<CanvasHelper>.Value); healed = true; }
+                    if (network == null && ComponentManager<Raft_Network>.Value != null)
+                    { _fNetwork?.SetValue(__instance, ComponentManager<Raft_Network>.Value); healed = true; }
+                    var np = ComponentManager<Network_Player>.Value;
+                    if (smgr == null && np != null && np.StorageManager != null)
+                    { _fStorageMgr?.SetValue(__instance, np.StorageManager); healed = true; }
+                }
+
+                int id = __instance != null ? __instance.GetInstanceID() : 0;
+                if (_nreLogged.Count < 32 && _nreLogged.Add(id))
+                {
+                    // null-map of every candidate the vanilla body dereferences (decompiled OnIsRayed)
+                    object pin = null;
+                    try { pin = UnityEngine.InputSystem.PlayerInput.GetPlayerByIndex(0); } catch { }
+                    object cic = null;
+                    try { cic = SimpleMonoBehaviourSingleton<CustomInputConfig>.Instance; } catch { }
+                    var dtm = canvas != null ? (object)canvas.displayTextManager : null;
+                    Plugin.Warn("OnIsRayed threw on '" + (__instance != null ? __instance.name : "<null instance>") + "'"
+                        + " | canvas=" + (canvas == null ? "NULL" : "ok")
+                        + " displayTextManager=" + (dtm == null ? "NULL" : "ok")
+                        + " network=" + (network == null ? "NULL" : "ok")
+                        + " storageManager=" + (smgr == null ? "NULL" : "ok")
+                        + " PlayerInput[0]=" + (pin == null ? "NULL" : "ok")
+                        + " CustomInputConfig=" + (cic == null ? "NULL" : "ok")
+                        + (healed ? " -> re-seeded from globals" : " -> nothing to re-seed")
+                        + " | " + __exception.GetType().Name + ": " + __exception.Message);
+                }
+                return null; // suppress: one broken chest must never lag the game / storm the log
+            }
+            catch { return null; }
+        }
     }
 }
