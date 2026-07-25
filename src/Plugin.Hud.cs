@@ -9,8 +9,8 @@ namespace PickUpMove
     public partial class Plugin
     {
         // In-world 'M Move' hint, driven every idle frame from the Ticker so it shows on ANY movable
-        // block (not just storage). Storages keep the Harmony postfix (stacks 'Move' under their own
-        // 'Open'); here we handle everything else and manage our own show/hide. Cached on the aimed
+        // block, storages included (the former Harmony postfix on Storage_Small.OnIsRayed is gone -
+        // see the note in UpdateMoveHint). We manage our own show/hide. Cached on the aimed
         // block so we don't run Serialize_Save()/OverlapBox every frame.
         private static bool _hintShown;
         private static Block _hintLastBlock;
@@ -66,8 +66,15 @@ namespace PickUpMove
             else { movable = IsMovable(block); _hintLastBlock = block; _hintLastMovable = movable; }
             if (!movable) { ClearHintIfShown(); return; }
 
-            // storages draw their own 'Open' + the postfix adds 'Move'; don't double-handle here
-            if (block is Storage_Small) { _hintShown = false; return; }
+            // Storages included since b217526+: the 'Move' line used to come from a Harmony postfix
+            // on Storage_Small.OnIsRayed, but under RML mid-session loads the Harmony replacement of a
+            // HOT method can come out broken (CrossOver/Rosetta stale-translation roulette - see
+            // recon/storage-onisrayed.*): the patched copy spuriously NREs every hovered frame and its
+            // own finalizer never runs. This LateTick path is statically compiled code - immune - and
+            // it even shows the hint in sick sessions where vanilla's own 'Open' prompt is broken.
+            // When the storage UI is open, ActiveMenu != None already cleared us above; IsOpen guards
+            // the one-frame gap during the open transition.
+            if (block is Storage_Small st && st.IsOpen) { ClearHintIfShown(); return; }
 
             var dtm = ComponentManager<DisplayTextManager>.Value;
             if (dtm == null) return;
@@ -117,100 +124,6 @@ namespace PickUpMove
             _hintShown = false;
             // hide ONLY our line (index 1); never touch the game's prompts at index 0
             try { ComponentManager<DisplayTextManager>.Value?.HideDisplayTexts(1); } catch { }
-        }
-    }
-
-    // Draws a "<key> Move" hint under the vanilla "Open" prompt whenever the player aims at a closed
-    // storage. Postfix so it runs right after Storage_Small.OnIsRayed set its own prompt (deterministic
-    // ordering, no flicker); clearAllTexts:false keeps the game's index-0 prompt and stacks ours at
-    // index 1. The game's OnRayExit/HideDisplayTexts clears both when you look away.
-    [HarmonyPatch(typeof(Storage_Small), nameof(Storage_Small.OnIsRayed))]
-    internal static class Patch_StorageMoveHint
-    {
-        [HarmonyPostfix]
-        private static void Postfix(Storage_Small __instance)
-        {
-            try
-            {
-                if (Plugin.Moving != null) return;                       // already carrying one
-                if (CanvasHelper.ActiveMenu != MenuType.None) return;    // a menu is open
-                if (__instance == null || __instance.IsOpen) return;    // chest is open
-                var dtm = ComponentManager<DisplayTextManager>.Value;
-                if (dtm == null) return;
-                dtm.ShowText(Loc.T("move"), Plugin.MoveKeyMain(), 1, 0, false);
-            }
-            catch { }
-        }
-
-        // --- NRE self-diagnosis + self-heal (storage-onisrayed recon) ------------------------------
-        // Observed once (RML host, mod loaded MID-SESSION into a running world): the VANILLA body of
-        // OnIsRayed throws NRE every hovered frame - 1721 identical stacks, a lag storm because RML
-        // mirrors Unity errors on screen. Which reference is null was never captured (the log rotated
-        // away), so this finalizer makes the next occurrence self-documenting: it logs the null-map of
-        // every candidate ONCE per storage, re-seeds the three fields that are mere caches of globals
-        // (canvas/network from ComponentManager<T>.Value, storageManager from Network_Player - the
-        // exact sources OnFinishedPlacement and OnIsRayed's own self-heal branch use, decompile
-        // Storage_Small.cs), and suppresses the throw so one broken chest can't storm the log again.
-        // Finalizer-by-name is recognized by both loaders (RML PatchTools.cs:86-95 falls back to
-        // GetMethod("Finalizer"); returning null suppresses - MethodPatcher emits Ldloc __exception;
-        // Brfalse <skip> after finalizers, verified on both 0Harmony.dll copies).
-        private static readonly HashSet<int> _nreLogged = new HashSet<int>();
-        private static System.Reflection.FieldInfo _fCanvas, _fNetwork, _fStorageMgr;
-
-        // Explicit attribute: name-based detection SHOULD work (RML 0Harmony AttributePatch.GetPatchType
-        // matches the literal method name) but the 20:00 repro ran with the finalizer present in the
-        // compiled assembly, PatchAll reporting no error, and the NRE still escaping - so the one
-        // unverified link (name detection) is now removed rather than trusted.
-        [HarmonyFinalizer]
-        private static System.Exception Finalizer(System.Exception __exception, Storage_Small __instance)
-        {
-            if (__exception == null) return null;
-            try
-            {
-                if (_fCanvas == null)
-                {
-                    _fCanvas = AccessTools.Field(typeof(Storage_Small), "canvas");
-                    _fNetwork = AccessTools.Field(typeof(Storage_Small), "network");
-                    _fStorageMgr = AccessTools.Field(typeof(Storage_Small), "storageManager");
-                }
-                var canvas = __instance != null ? _fCanvas?.GetValue(__instance) as CanvasHelper : null;
-                var network = __instance != null ? _fNetwork?.GetValue(__instance) as Raft_Network : null;
-                var smgr = __instance != null ? _fStorageMgr?.GetValue(__instance) as StorageManager : null;
-
-                bool healed = false;
-                if (__instance != null)
-                {
-                    if (canvas == null && ComponentManager<CanvasHelper>.Value != null)
-                    { _fCanvas?.SetValue(__instance, ComponentManager<CanvasHelper>.Value); healed = true; }
-                    if (network == null && ComponentManager<Raft_Network>.Value != null)
-                    { _fNetwork?.SetValue(__instance, ComponentManager<Raft_Network>.Value); healed = true; }
-                    var np = ComponentManager<Network_Player>.Value;
-                    if (smgr == null && np != null && np.StorageManager != null)
-                    { _fStorageMgr?.SetValue(__instance, np.StorageManager); healed = true; }
-                }
-
-                int id = __instance != null ? __instance.GetInstanceID() : 0;
-                if (_nreLogged.Count < 32 && _nreLogged.Add(id))
-                {
-                    // null-map of every candidate the vanilla body dereferences (decompiled OnIsRayed)
-                    object pin = null;
-                    try { pin = UnityEngine.InputSystem.PlayerInput.GetPlayerByIndex(0); } catch { }
-                    object cic = null;
-                    try { cic = SimpleMonoBehaviourSingleton<CustomInputConfig>.Instance; } catch { }
-                    var dtm = canvas != null ? (object)canvas.displayTextManager : null;
-                    Plugin.Warn("OnIsRayed threw on '" + (__instance != null ? __instance.name : "<null instance>") + "'"
-                        + " | canvas=" + (canvas == null ? "NULL" : "ok")
-                        + " displayTextManager=" + (dtm == null ? "NULL" : "ok")
-                        + " network=" + (network == null ? "NULL" : "ok")
-                        + " storageManager=" + (smgr == null ? "NULL" : "ok")
-                        + " PlayerInput[0]=" + (pin == null ? "NULL" : "ok")
-                        + " CustomInputConfig=" + (cic == null ? "NULL" : "ok")
-                        + (healed ? " -> re-seeded from globals" : " -> nothing to re-seed")
-                        + " | " + __exception.GetType().Name + ": " + __exception.Message);
-                }
-                return null; // suppress: one broken chest must never lag the game / storm the log
-            }
-            catch { return null; }
         }
     }
 }

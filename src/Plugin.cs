@@ -16,11 +16,11 @@ namespace PickUpMove
     //     Placement is handled by reading the vanilla ghost (BlockCreator.selectedBlock) directly on
     //     left-click. Vanilla cannot double-place the chest because the storage item is not in the
     //     player's inventory while it is being carried.
-    //   * ONE Harmony postfix is used, on Storage_Small.OnIsRayed, only to draw the "Move" key hint
-    //     under the vanilla "Open" prompt. This is safe in that env: the patch is invoked by the
-    //     game's own (pumped) raycast system, not our Update, and Harmony detours live in the global
-    //     patch registry - the host plugin base class has no OnDestroy/UnpatchSelf (verified by
-    //     decompile), so the component being destroyed after Awake does NOT remove them.
+    //   * ZERO Harmony patches on game methods. The storage 'Move' hint used to be a postfix on
+    //     Storage_Small.OnIsRayed, but under RML (mid-session load into a live process via CrossOver/
+    //     Rosetta) patching a HOT method can yield a broken replacement that spuriously NREs every
+    //     hovered frame with its own exception handling dead (recon/storage-onisrayed.*, sessions
+    //     A/B/C 2026-07-25). All hints now come from our LateTick raycast - plain compiled code.
     //   * The same layout is what makes the mod portable: nothing that matters hangs off the host
     //     component, so swapping BepInEx for the Raft Mod Loader is a matter of swapping one file.
     //
@@ -94,13 +94,14 @@ namespace PickUpMove
             // and must NOT wipe an in-flight move or the peer roster.
             UnityEngine.SceneManagement.SceneManager.sceneLoaded += OnSceneLoaded;
 
-            // ONE Harmony postfix for the in-world "Move" key hint (see architecture note). Invoked by
-            // the game's raycast system, independent of our Update; patches persist past Awake.
+            // Harmony instance kept for the host contract (UnpatchSelf) and future need, but the
+            // assembly deliberately contains NO [HarmonyPatch] classes - PatchAll is a verified no-op
+            // (see the patch check line below). Rationale: the architecture note above.
             try { _harmony = new Harmony(Guid); _harmony.PatchAll(typeof(Plugin).Assembly); }
             catch (System.Exception ex) { Warn("Harmony patch failed (Move hint disabled, core feature unaffected): " + ex.Message); }
-            // Self-verification (storage-onisrayed recon): the 20:00 repro had the finalizer IN the
-            // compiled assembly and PatchAll reporting no error, yet the NRE still escaped the patched
-            // method. Whether a patch is live must be a LOG LINE, not an inference from decompiles.
+            // Self-verification (storage-onisrayed recon): counts must all be 0 and owners empty now
+            // that we ship no patches - and if some OTHER mod has OnIsRayed patched, owners names it.
+            // Whether a patch is live must be a LOG LINE, not an inference from decompiles.
             try
             {
                 var m = HarmonyLib.AccessTools.Method(typeof(Storage_Small), "OnIsRayed");
