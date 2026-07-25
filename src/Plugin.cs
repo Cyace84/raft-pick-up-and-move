@@ -60,7 +60,7 @@ namespace PickUpMove
 
         // ---- host contract ---------------------------------------------------------------------
         // The mod runs under two loaders: BepInEx (src/hosts/Host.BepInEx.cs) and Raft Mod Loader
-        // (rml/Host.Rml.cs). Every loader-specific capability is funnelled through the five members
+        // (rml/Host.Rml.cs). Every loader-specific capability is funnelled through the six members
         // below, which a host fills in before calling InitCommon(). Nothing else in the mod may
         // touch a loader API - that is what keeps one source tree shippable to both.
         internal static System.Action<PumLevel, string> LogSink; // loader console / log file
