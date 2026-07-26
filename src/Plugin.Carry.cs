@@ -481,6 +481,9 @@ namespace PickUpMove
             { NoteHud(Loc.T("no_host")); AbortKeepOriginal(); return; }
             _cmSentTime = Time.realtimeSinceStartup; _cmOrigGoneLogged = false; _cmSeenLogged = false;
             _cmAcked = false; _cmProbeSent = false;
+            // keep the payload so an 'r_host_busy' refusal can be retried without the player
+            // re-aiming (the ghost is already gone by the time the refusal lands)
+            _cmPos = pos; _cmRot = rot; _cmDps = dps; _cmRetries = 0; _cmRetryAt = 0f;
             // remember our captured state + snapshot existing blocks so we can find the new one
             // and restore it on our own view (host's restore doesn't replicate device state back).
             _clientMoveRgd = _movingRgd; _clientMoveSlots = _movingSlots;

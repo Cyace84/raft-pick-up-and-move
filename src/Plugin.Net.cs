@@ -37,6 +37,16 @@ namespace PickUpMove
         private static float _cmSentTime;          // Time.realtimeSinceStartup when the request left
         private static bool _cmOrigGoneLogged;
         private static bool _cmSeenLogged;
+        // Silent retry after an 'r_host_busy' refusal: the host is mid-carry, which is human-paced,
+        // so one immediate retry would just bounce. Keep the request payload and re-send it a few
+        // times, spaced, before telling the player anything. A retry is a NEW request with a fresh
+        // RecvTime, so the moved-epoch gate still protects it from a world that changed meanwhile.
+        private const int CmMaxRetries = 3;
+        private const float CmRetryDelay = 0.75f;
+        private static Vector3 _cmPos, _cmRot;
+        private static DPS _cmDps;
+        private static int _cmRetries;
+        private static float _cmRetryAt;           // 0 = no retry pending
         private static Steamworks.CSteamID _hostReqSender; // valid = current verify is a client request
         private static float _hostReqRecvTime;
         // HOST place-first verify: nb is created but the original is removed only once nb settles to
@@ -136,11 +146,23 @@ namespace PickUpMove
                         if (kind == 2) // refusal
                         {
                             string reason = r.ReadString();
+                            // host busy with its own carry: wait it out silently a few times. The
+                            // original stays hidden and the pending state stays intact - to the
+                            // player this is just a move that took a moment longer.
+                            if (mine && reason == "r_host_busy" && _cmRetries < CmMaxRetries)
+                            {
+                                _cmRetries++;
+                                _cmRetryAt = Time.realtimeSinceStartup + CmRetryDelay;
+                                _clientMoveDeadlineFrame = Time.frameCount + 600; // don't time out while waiting to retry
+                                Note($"[t] host busy - retry {_cmRetries}/{CmMaxRetries} in {CmRetryDelay:F2}s");
+                                continue;
+                            }
                             if (mine)
                             {
                                 RestoreHidden();
                                 _pendingClientMoveOriginal = null; _awaitingHostMove = false;
                                 _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null; _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
+                                _cmRetries = 0; _cmRetryAt = 0f;
                                 NoteHud(Loc.T(reason));
                             }
                         }
@@ -471,6 +493,15 @@ namespace PickUpMove
                                 || (_reqScan != null && _reqScan.B != null && _reqScan.B.ObjectIndex == idx)
                                 || (_tpVerifying && _tpBlock != null && _tpBlock.ObjectIndex == idx))
                             { SendMoveRefusal(sender, idx, "r_carry"); break; }
+                            // STARVATION GATE (observed 07-25, client waits of 10.3/12.9/27.6/33.7s):
+                            // the move pipeline is single-slot - one _hiddenColliders bookkeeping, one
+                            // _reqScan, one verifier - so a request must wait for whatever the host is
+                            // doing. Verification phases are bounded (<6s) and keep queueing. A CARRY
+                            // is not: `Moving` is set from the M press until place/cancel, i.e. as long
+                            // as a human aims. Queueing behind that froze the client for tens of
+                            // seconds with its block invisible. Refuse NOW - the client retries a few
+                            // times on its own and only then surfaces a message.
+                            if (Moving != null) { SendMoveRefusal(sender, idx, "r_host_busy"); break; }
                             _canceledReqs.Remove((sender.m_SteamID, idx)); // a retry supersedes any older cancel FROM THE SAME PEER
                             SendMoveCtl(sender, 3, idx);
                             _moveReqQueue.Enqueue(new MoveReq { Buf = buf, Sender = sender, RecvTime = Time.realtimeSinceStartup, Idx = idx });
@@ -551,6 +582,20 @@ namespace PickUpMove
             }
             catch (System.Exception ex) { Warn("move req poll: " + ex.Message); }
 
+            // The host started carrying while requests sat in the queue (they were queued behind a
+            // short verification): same unbounded wait as above - answer them now instead.
+            if (Moving != null && _moveReqQueue.Count > 0)
+            {
+                int flushed = _moveReqQueue.Count;
+                while (_moveReqQueue.Count > 0)
+                {
+                    var q = _moveReqQueue.Dequeue();
+                    if (_canceledReqs.Remove((q.Sender.m_SteamID, q.Idx))) continue;
+                    SendMoveRefusal(q.Sender, q.Idx, "r_host_busy");
+                }
+                Note($"[t] host started carrying - {flushed} queued request(s) answered 'host busy'");
+            }
+
             while (!_hostVerifying && !_tpVerifying && _reqScan == null && Moving == null && _moveReqQueue.Count > 0)
             {
                 var req = _moveReqQueue.Dequeue();
@@ -558,7 +603,8 @@ namespace PickUpMove
                 HandleMoveRequest(req);
                 break;
             }
-            if ((_hostVerifying || Moving != null) && _moveReqQueue.Count > 0 && Time.frameCount % 300 == 0)
+            // Moving is no longer part of this: a carry now flushes the queue instead of holding it.
+            if ((_hostVerifying || _tpVerifying || _reqScan != null) && _moveReqQueue.Count > 0 && Time.frameCount % 300 == 0)
                 Note($"[t] {_moveReqQueue.Count} move request(s) queued behind the current move");
         }
 
@@ -691,6 +737,24 @@ namespace PickUpMove
             // the sole holder of that index, exactly like the host ends up.
             if (_pendingClientMoveOriginal != null)
             {
+                // due retry after an 'r_host_busy' refusal (see _cmRetryAt)
+                if (_cmRetryAt > 0f && Time.realtimeSinceStartup >= _cmRetryAt)
+                {
+                    _cmRetryAt = 0f;
+                    var rp = ComponentManager<Network_Player>.Value;
+                    if (rp?.Network == null || !SendMoveRequest(rp, _clientMoveOrigIndex, _cmPos, _cmRot, _cmDps))
+                    {
+                        RestoreHidden();
+                        _pendingClientMoveOriginal = null; _awaitingHostMove = false;
+                        _clientMoveRgd = null; _clientMoveSlots = null; _clientMoveText = null; _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
+                        NoteHud(Loc.T("no_host"));
+                        return;
+                    }
+                    _cmSentTime = Time.realtimeSinceStartup;
+                    _cmAcked = false; _cmProbeSent = false;
+                    _clientMoveDeadlineFrame = Time.frameCount + 600;
+                    return;
+                }
                 if (Time.frameCount > _clientMoveDeadlineFrame)
                 {
                     var np = ComponentManager<Network_Player>.Value;
@@ -813,6 +877,7 @@ namespace PickUpMove
             _clientMovePaint = default; _clientMoveRestored = false;
             _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
             _cmAcked = false; _cmProbeSent = false; _cmOrigGoneLogged = false; _cmSeenLogged = false;
+            _cmRetries = 0; _cmRetryAt = 0f;
 
             // host verify + request queue
             ResetHostVerify();

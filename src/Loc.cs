@@ -192,6 +192,20 @@ namespace PickUpMove
                 ["ja"]="他のプレイヤーが使用中です。",
                 ["ko"]="다른 플레이어가 사용 중입니다.", ["pl"]="Inny gracz właśnie z niego korzysta." },
 
+            // The host is mid-move ITSELF (a human carry has no bounded duration). The client
+            // retries silently a few times first; this is only shown once those run out.
+            ["r_host_busy"] = new Dictionary<string, string> {
+                ["en"]="The host is moving something. Try again in a moment.",
+                ["ru"]="Хост сейчас что-то переносит. Попробуйте через секунду.",
+                ["de"]="Der Host verschiebt gerade etwas. Versuche es gleich erneut.",
+                ["fr"]="L'hôte déplace quelque chose. Réessayez dans un instant.",
+                ["sv"]="Värden flyttar något just nu. Försök igen strax.",
+                ["it"]="L'host sta spostando qualcosa. Riprova tra un istante.",
+                ["pt"]="O host está movendo algo. Tente novamente em um instante.",
+                ["zh"]="房主正在移动物品，请稍后再试。",
+                ["ja"]="ホストが何かを移動中です。少し待ってから再試行してください。",
+                ["ko"]="호스트가 무언가를 옮기는 중입니다. 잠시 후 다시 시도하세요.", ["pl"]="Host właśnie coś przenosi. Spróbuj za chwilę." },
+
             ["r_not_found"] = new Dictionary<string, string> {
                 ["en"]="The host couldn't find that block.",
                 ["ru"]="Хост не нашёл этот блок.",
