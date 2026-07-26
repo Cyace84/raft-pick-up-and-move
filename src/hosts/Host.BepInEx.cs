@@ -11,7 +11,7 @@ namespace PickUpMove
     // and never compiled into this assembly - see the csproj's Compile Remove). Everything in here is
     // BepInEx-only: the plugin attribute, the config file, the logger. It fills in the host contract
     // declared in Plugin.cs and hands over to InitCommon().
-    [BepInPlugin(Guid, "Pick Up & Move", "1.0.0")]
+    [BepInPlugin(Guid, "Pick Up & Move", "1.1.0")]
     public partial class Plugin : BaseUnityPlugin
     {
         public static ConfigEntry<KeyboardShortcut> MoveKey;
