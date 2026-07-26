@@ -122,12 +122,7 @@ namespace PickUpMove
             DestroyGhostPreviews();
             AddGhostPreview(block, block, pruneAgainstGhost: true);
 
-            _hiddenColliders.Clear();
-            _hiddenRenderers.Clear();
-            _hiddenCanvases.Clear();
-            foreach (var c in block.GetComponentsInChildren<Collider>())
-                if (c.enabled) { c.enabled = false; _hiddenColliders.Add(c); }
-            HideVisual(block);
+            HideForMove(block);
 
             // make sure the build creator is active so the ghost shows, then engage it. Remember
             // whether WE enabled it: without the hammer equipped it's inactive, and its Update drives
@@ -167,6 +162,21 @@ namespace PickUpMove
                 if (r.enabled) { r.enabled = false; _hiddenRenderers.Add(r); }
             foreach (var cv in b.GetComponentsInChildren<Canvas>())
                 if (cv.enabled) { cv.enabled = false; _hiddenCanvases.Add(cv); }
+        }
+
+        // Take a block out of sight for the duration of a move: colliders off (so the ghost can be
+        // placed on its own spot and stability is judged as if it were gone) + renderers/canvases off.
+        // Paired with RestoreHidden; both are idempotent, which matters now that a client move hides,
+        // shows and hides again (visible while the request waits, hidden once the host rebuilds).
+        internal static void HideForMove(Block block)
+        {
+            if (block == null) return;
+            _hiddenColliders.Clear();
+            _hiddenRenderers.Clear();
+            _hiddenCanvases.Clear();
+            foreach (var c in block.GetComponentsInChildren<Collider>())
+                if (c.enabled) { c.enabled = false; _hiddenColliders.Add(c); }
+            HideVisual(block);
         }
 
         private static void RestoreHidden()
@@ -493,6 +503,15 @@ namespace PickUpMove
             _clientMoveOrigIndex = original.ObjectIndex; _clientMoveNewIndex = 0;
             _pendingClientMoveOriginal = original;
             _awaitingHostMove = true;
+            // PENDING IS FREE: the request is now just data in flight, so put the block back on
+            // screen instead of leaving a hole where it stood. Hiding it until the verdict was
+            // masking latency that is normally 60ms - and when the host was busy it turned a wait
+            // into "my chest vanished" (observed 07-25: 33.7s). The only copy that exists is still
+            // the real one at the old spot; nothing is authoritative until the host answers. The
+            // rebuild branch re-hides it on the host's 'rebuilding' signal, which is the only case
+            // where a second copy could be on screen at once.
+            RestoreHidden();
+            _cmPendingShown = false;
             _clientMoveDeadlineFrame = Time.frameCount + 600; // ~10s failsafe
             Note($"client: asked host to move '{item.UniqueName}'; original kept until the host confirms.");
             Moving = null; _movingItem = null; _movingSlots = null; ExitBuildMode();

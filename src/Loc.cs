@@ -192,6 +192,19 @@ namespace PickUpMove
                 ["ja"]="他のプレイヤーが使用中です。",
                 ["ko"]="다른 플레이어가 사용 중입니다.", ["pl"]="Inny gracz właśnie z niego korzysta." },
 
+            // The request is in flight and the block is still standing where it was.
+            ["pending"] = new Dictionary<string, string> {
+                ["en"]="Waiting for the host… it stays here until then.",
+                ["ru"]="Ждём хоста… до этого блок остаётся здесь.",
+                ["de"]="Warte auf den Host… bis dahin bleibt es hier.",
+                ["fr"]="En attente de l'hôte… il reste ici jusque-là.",
+                ["sv"]="Väntar på värden… den står kvar tills dess.",
+                ["it"]="In attesa dell'host… fino ad allora resta qui.",
+                ["pt"]="Aguardando o host… até lá fica aqui.",
+                ["zh"]="等待房主…在此之前它留在原处。",
+                ["ja"]="ホストの応答待ち…それまではここにあります。",
+                ["ko"]="호스트를 기다리는 중… 그때까지는 제자리에 있습니다.", ["pl"]="Czekam na hosta… do tego czasu zostaje na miejscu." },
+
             // The destination was taken while the request waited in the host's queue.
             ["r_spot_taken"] = new Dictionary<string, string> {
                 ["en"]="That spot was taken while your move waited. Left where it was.",

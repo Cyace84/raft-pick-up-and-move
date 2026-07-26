@@ -47,6 +47,8 @@ namespace PickUpMove
         private static DPS _cmDps;
         private static int _cmRetries;
         private static float _cmRetryAt;           // 0 = no retry pending
+        private static bool _cmPendingShown;       // "waiting for the host" already on screen
+        private const float CmPendingNoteAfter = 0.5f; // don't flash it on a 60ms round trip
         private static Steamworks.CSteamID _hostReqSender; // valid = current verify is a client request
         private static float _hostReqRecvTime;
         // HOST place-first verify: nb is created but the original is removed only once nb settles to
@@ -176,6 +178,14 @@ namespace PickUpMove
                                 Note($"[t] host acked after {dt:F2}s");
                                 if (dt > 3f) NoteHud(Loc.T("working"));
                             }
+                        }
+                        else if (kind == 15) // the host is about to REBUILD our block - hide our copy
+                        {
+                            // Only the rebuild branch needs this: it creates the new block before it
+                            // removes the original, so for the length of the host's stability verify
+                            // (<=6s) both would be on screen. The teleport branch moves the same
+                            // object and never needs us to hide anything.
+                            if (mine) HideForMove(_pendingClientMoveOriginal);
                         }
                         else if (kind == 9) // paint notify: recolour our replica (idempotent, resent 2x)
                         {
@@ -727,6 +737,12 @@ namespace PickUpMove
             if (original is Storage_Small stBusy && stBusy.IsOpen)
             { SendMoveRefusal(req.Sender, origIndex, "r_busy"); return; }
 
+            // Past every refusal - this move IS happening as a rebuild. Tell the requester to hide
+            // its copy now: the rebuild creates the new block before it removes the original, so for
+            // the length of the stability verify (<=6s) both would otherwise be on screen. Sent here
+            // rather than at the top of the branch so a refused request never hides anything.
+            SendMoveCtl(req.Sender, 15, origIndex);
+
             // authoritative capture from the original block (host owns the real state)
             var slots = (original is Storage_Small st && st.GetInventoryReference() != null)
                 ? st.GetInventoryReference().GetRGDSlots() : null;
@@ -799,6 +815,10 @@ namespace PickUpMove
                     _clientMoveDeadlineFrame = Time.frameCount + 600;
                     return;
                 }
+                // the block is visible where it stands while we wait, so say what is going on
+                // rather than leaving the player wondering whether the click registered
+                if (!_cmPendingShown && Time.realtimeSinceStartup - _cmSentTime > CmPendingNoteAfter)
+                { _cmPendingShown = true; NoteHud(Loc.T("pending")); }
                 if (Time.frameCount > _clientMoveDeadlineFrame)
                 {
                     var np = ComponentManager<Network_Player>.Value;
@@ -921,7 +941,7 @@ namespace PickUpMove
             _clientMovePaint = default; _clientMoveRestored = false;
             _clientMoveOrigIndex = 0; _clientMoveNewIndex = 0;
             _cmAcked = false; _cmProbeSent = false; _cmOrigGoneLogged = false; _cmSeenLogged = false;
-            _cmRetries = 0; _cmRetryAt = 0f;
+            _cmRetries = 0; _cmRetryAt = 0f; _cmPendingShown = false;
 
             // host verify + request queue
             ResetHostVerify();
