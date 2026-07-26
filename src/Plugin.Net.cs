@@ -276,6 +276,46 @@ namespace PickUpMove
         // stale queued request could re-move it; recreate is covered by the zombie gate as well).
         private static readonly Dictionary<uint, float> _movedAt = new Dictionary<uint, float>();
 
+        // DESTINATION EPOCH. The moved-epoch above protects the block being MOVED; nothing protected
+        // the SPOT it is aimed at. The teleport path never validates the destination at all (it moves
+        // the transform and then verifies stability only, Plugin.Teleport.cs), so a request that sat
+        // in the queue while the world moved on could land a block on top of whatever now stands
+        // there. Harmless while waits were milliseconds; not harmless once a request can wait out a
+        // human carry (observed 07-25: 33.7s).
+        //
+        // So: remember where every move of OURS committed, and refuse a request whose target was
+        // taken AFTER we received it. Radius is vanilla's own "same position" notion
+        // (AdvancedCollision.HasSamePosition: distance < 0.05), deliberately narrow - blocks that
+        // legitimately share a cell (a water pipe running through a sprinkler's cell) must still be
+        // movable next to each other.
+        //
+        // LIMIT, stated plainly: this sees only occupancy WE caused. A player building a fresh block
+        // there with the hammer is invisible to us - covering that needs a physics overlap test at
+        // execution time, which needs one in-game control measurement first (does a healthy teleport
+        // report IsOverlapping()==None right after the move?) and is therefore not in this commit.
+        private const float DestSameSpot = 0.05f;   // vanilla's HasSamePosition radius
+        private const float DestEpochTtl = 120f;    // a request older than this is long dead anyway
+        private static readonly List<KeyValuePair<Vector3, float>> _placedAt = new List<KeyValuePair<Vector3, float>>();
+
+        /// <summary>Stamp a committed move's DESTINATION (host side). Prunes itself.</summary>
+        private static void StampPlaced(Vector3 pos)
+        {
+            float now = Time.realtimeSinceStartup;
+            _placedAt.RemoveAll(e => now - e.Value > DestEpochTtl);
+            _placedAt.Add(new KeyValuePair<Vector3, float>(pos, now));
+        }
+
+        /// <summary>True if one of our moves committed at that spot after the request arrived.</summary>
+        private static bool DestinationTakenSince(Vector3 pos, float recvTime)
+        {
+            for (int i = 0; i < _placedAt.Count; i++)
+            {
+                var e = _placedAt[i];
+                if (e.Value > recvTime && Vector3.Distance(e.Key, pos) < DestSameSpot) return true;
+            }
+            return false;
+        }
+
         // ---------------- CARRY CLAIM ("one M per block") ----------------
         // Picking a block up CLAIMS it for the carrier; everyone else's M on it is refused until the
         // carry resolves. Optimistic: M starts the carry instantly, the claim races to the host
@@ -652,6 +692,10 @@ namespace PickUpMove
             // passes (its RecvTime postdates the commit).
             if (_movedAt.TryGetValue(origIndex, out float mvt) && req.RecvTime < mvt)
             { SendMoveRefusal(req.Sender, origIndex, "r_gone"); return; }
+            // DESTINATION-EPOCH gate (twin of the above, aimed at the target instead of the block):
+            // something of ours committed on that spot while this request waited.
+            if (DestinationTakenSince(pos, req.RecvTime))
+            { SendMoveRefusal(req.Sender, origIndex, "r_spot_taken"); return; }
             var item = original.buildableItem;
             if (item == null) { SendMoveRefusal(req.Sender, origIndex, "r_no_rebuild"); return; }
             var player = ComponentManager<Network_Player>.Value;
@@ -881,7 +925,7 @@ namespace PickUpMove
 
             // host verify + request queue
             ResetHostVerify();
-            _moveReqQueue.Clear(); _canceledReqs.Clear(); _movedAt.Clear();
+            _moveReqQueue.Clear(); _canceledReqs.Clear(); _movedAt.Clear(); _placedAt.Clear();
             _claims.Clear(); _claimMirror.Clear(); _carryClaimIdx = 0;
 
             // teleport
@@ -1039,6 +1083,7 @@ namespace PickUpMove
             // moved-epoch: the zombie gate already covers the dead origIndex for its ~2s window;
             // this stamp keeps refusing stale requests after that window too.
             _movedAt[origIndex] = Time.realtimeSinceStartup;
+            StampPlaced(nb.transform.localPosition);
 
             int restored = slots?.Length ?? 0;
             Note($"placed at {nb.transform.localPosition.ToString("F2")} after settling (+{delta}f, host)"

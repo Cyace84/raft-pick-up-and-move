@@ -304,6 +304,10 @@ namespace PickUpMove
                 // HandleMoveRequest). Deps moved along get stamped too - same reasoning.
                 _movedAt[_tpBlock.ObjectIndex] = Time.realtimeSinceStartup;
                 foreach (var d in _tpDeps) if (d != null) _movedAt[d.ObjectIndex] = Time.realtimeSinceStartup;
+                // destination-epoch: this spot (and every spot a dependent landed on) is now taken,
+                // so a request that was already queued when we committed can't be aimed into it.
+                StampPlaced(_tpBlock.transform.localPosition);
+                foreach (var d in _tpDeps) if (d != null) StampPlaced(d.transform.localPosition);
                 BroadcastTeleport(_tpBlock);
                 foreach (var d in _tpDeps) if (d != null) BroadcastTeleport(d);
                 Note($"moved to {_tpBlock.transform.localPosition.ToString("F2")} (+{delta}f, teleport)"

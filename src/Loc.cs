@@ -192,6 +192,19 @@ namespace PickUpMove
                 ["ja"]="他のプレイヤーが使用中です。",
                 ["ko"]="다른 플레이어가 사용 중입니다.", ["pl"]="Inny gracz właśnie z niego korzysta." },
 
+            // The destination was taken while the request waited in the host's queue.
+            ["r_spot_taken"] = new Dictionary<string, string> {
+                ["en"]="That spot was taken while your move waited. Left where it was.",
+                ["ru"]="Пока перемещение ждало, место заняли. Оставлено на месте.",
+                ["de"]="Der Platz wurde belegt, während gewartet wurde. Bleibt, wo es war.",
+                ["fr"]="La place a été prise pendant l'attente. Laissé où il était.",
+                ["sv"]="Platsen togs medan flytten väntade. Lämnades där den stod.",
+                ["it"]="Il posto è stato occupato durante l'attesa. Lasciato dov'era.",
+                ["pt"]="O lugar foi ocupado enquanto o movimento esperava. Deixado no lugar.",
+                ["zh"]="等待期间该位置被占用。已保留在原处。",
+                ["ja"]="待っている間にその場所が使われました。元の位置のままです。",
+                ["ko"]="기다리는 동안 그 자리가 차지되었습니다. 원래 자리에 두었습니다.", ["pl"]="Miejsce zajęto w trakcie oczekiwania. Pozostawiono na miejscu." },
+
             // The host is mid-move ITSELF (a human carry has no bounded duration). The client
             // retries silently a few times first; this is only shown once those run out.
             ["r_host_busy"] = new Dictionary<string, string> {
