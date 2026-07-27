@@ -192,6 +192,19 @@ namespace PickUpMove
                 ["ja"]="他のプレイヤーが使用中です。",
                 ["ko"]="다른 플레이어가 사용 중입니다.", ["pl"]="Inny gracz właśnie z niego korzysta." },
 
+            // Host only: another player's move is queued behind us, let it through first.
+            ["yield"] = new Dictionary<string, string> {
+                ["en"]="Letting another player's move through first.",
+                ["ru"]="Сначала пропускаю перемещение другого игрока.",
+                ["de"]="Lasse zuerst den Zug eines anderen Spielers durch.",
+                ["fr"]="Je laisse passer le déplacement d'un autre joueur.",
+                ["sv"]="Släpper först fram en annan spelares flytt.",
+                ["it"]="Prima faccio passare lo spostamento di un altro giocatore.",
+                ["pt"]="Deixando o movimento de outro jogador passar primeiro.",
+                ["zh"]="先让另一名玩家的移动通过。",
+                ["ja"]="先に他のプレイヤーの移動を通します。",
+                ["ko"]="다른 플레이어의 이동을 먼저 처리합니다.", ["pl"]="Najpierw przepuszczam ruch innego gracza." },
+
             // The request is in flight and the block is still standing where it was.
             ["pending"] = new Dictionary<string, string> {
                 ["en"]="Waiting for the host… it stays here until then.",

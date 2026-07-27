@@ -87,6 +87,13 @@ namespace PickUpMove
             if (block is Storage_Small sBusy && sBusy.IsOpen)
             { NoteHud(Loc.T("r_busy")); return; }
 
+            // FAIRNESS (host only): someone's request is already in the queue, waiting for us. The
+            // pipeline is single-slot, so if we start another carry now, that request waits out our
+            // aiming too - and the player who sent it has no way to know or hurry us. Let the queue
+            // through first; it drains one per frame, so this is a blink unless a move is verifying.
+            if (Raft_Network.IsHost && QueuedRequestCount > 0)
+            { NoteHud(Loc.T("yield")); return; }
+
             // CLAIM: someone else is carrying this block right now - one M per block, no exceptions.
             // (host checks the authoritative table, a client checks its mirror; the in-flight race
             // is arbitrated host-side and the loser's carry is torn down via kind-14.)
@@ -491,9 +498,7 @@ namespace PickUpMove
             { NoteHud(Loc.T("no_host")); AbortKeepOriginal(); return; }
             _cmSentTime = Time.realtimeSinceStartup; _cmOrigGoneLogged = false; _cmSeenLogged = false;
             _cmAcked = false; _cmProbeSent = false;
-            // keep the payload so an 'r_host_busy' refusal can be retried without the player
-            // re-aiming (the ghost is already gone by the time the refusal lands)
-            _cmPos = pos; _cmRot = rot; _cmDps = dps; _cmRetries = 0; _cmRetryAt = 0f;
+
             // remember our captured state + snapshot existing blocks so we can find the new one
             // and restore it on our own view (host's restore doesn't replicate device state back).
             _clientMoveRgd = _movingRgd; _clientMoveSlots = _movingSlots;
@@ -503,16 +508,14 @@ namespace PickUpMove
             _clientMoveOrigIndex = original.ObjectIndex; _clientMoveNewIndex = 0;
             _pendingClientMoveOriginal = original;
             _awaitingHostMove = true;
-            // PENDING IS FREE: the request is now just data in flight, so put the block back on
-            // screen instead of leaving a hole where it stood. Hiding it until the verdict was
-            // masking latency that is normally 60ms - and when the host was busy it turned a wait
-            // into "my chest vanished" (observed 07-25: 33.7s). The only copy that exists is still
-            // the real one at the old spot; nothing is authoritative until the host answers. The
-            // rebuild branch re-hides it on the host's 'rebuilding' signal, which is the only case
-            // where a second copy could be on screen at once.
-            RestoreHidden();
+            // Stay hidden for now. A healthy verdict lands in ~60ms, and putting the block back on
+            // screen for those two frames reads as the chest flickering back to its old spot before
+            // jumping - worse than the hole it was meant to fix. PollClientMove restores it only if
+            // the wait actually turns into a wait (CmPendingNoteAfter), which is the case that hurt:
+            // 33.7s of an invisible chest, observed 07-25.
             _cmPendingShown = false;
-            _clientMoveDeadlineFrame = Time.frameCount + 600; // ~10s failsafe
+            _clientMoveDeadlineFrame = Time.frameCount + 600;               // phase-2 grace (frames)
+            _cmDeadlineTime = Time.realtimeSinceStartup + CmPreAckWait;     // verdict failsafe (wall clock)
             Note($"client: asked host to move '{item.UniqueName}'; original kept until the host confirms.");
             Moving = null; _movingItem = null; _movingSlots = null; ExitBuildMode();
         }
