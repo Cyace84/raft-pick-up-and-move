@@ -192,18 +192,19 @@ namespace PickUpMove
                 ["ja"]="他のプレイヤーが使用中です。",
                 ["ko"]="다른 플레이어가 사용 중입니다.", ["pl"]="Inny gracz właśnie z niego korzysta." },
 
-            // Host only: another player's move is queued behind us, let it through first.
+            // Host only, shown WHILE CARRYING: someone's move is queued behind this carry and will
+            // stay queued until the block is put down.
             ["yield"] = new Dictionary<string, string> {
-                ["en"]="Letting another player's move through first.",
-                ["ru"]="Сначала пропускаю перемещение другого игрока.",
-                ["de"]="Lasse zuerst den Zug eines anderen Spielers durch.",
-                ["fr"]="Je laisse passer le déplacement d'un autre joueur.",
-                ["sv"]="Släpper först fram en annan spelares flytt.",
-                ["it"]="Prima faccio passare lo spostamento di un altro giocatore.",
-                ["pt"]="Deixando o movimento de outro jogador passar primeiro.",
-                ["zh"]="先让另一名玩家的移动通过。",
-                ["ja"]="先に他のプレイヤーの移動を通します。",
-                ["ko"]="다른 플레이어의 이동을 먼저 처리합니다.", ["pl"]="Najpierw przepuszczam ruch innego gracza." },
+                ["en"]="Another player's move is waiting for you to put this down ({0}s).",
+                ["ru"]="Перемещение другого игрока ждёт, пока вы поставите блок ({0} с).",
+                ["de"]="Der Zug eines anderen Spielers wartet, bis du das abstellst ({0}s).",
+                ["fr"]="Le déplacement d'un autre joueur attend que vous posiez ce bloc ({0}s).",
+                ["sv"]="En annan spelares flytt väntar på att du ställer ner den här ({0}s).",
+                ["it"]="Lo spostamento di un altro giocatore aspetta che tu posi questo blocco ({0}s).",
+                ["pt"]="O movimento de outro jogador espera você largar isto ({0}s).",
+                ["zh"]="另一名玩家的移动正在等你把它放下（{0} 秒）。",
+                ["ja"]="他のプレイヤーの移動が、あなたがこれを置くのを待っています（{0}秒）。",
+                ["ko"]="다른 플레이어의 이동이 당신이 이것을 내려놓기를 기다리고 있습니다 ({0}초).", ["pl"]="Ruch innego gracza czeka, aż to odłożysz ({0}s)." },
 
             // The request is in flight and the block is still standing where it was.
             ["pending"] = new Dictionary<string, string> {

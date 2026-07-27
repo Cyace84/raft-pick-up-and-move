@@ -177,6 +177,13 @@ namespace PickUpMove
             _hudNote = msg; _hudNoteUntil = Time.realtimeSinceStartup + 2.5f;
         }
 
+        // HUD without the log line, for a note that has to be REPEATED to stay on screen (the note
+        // lives 2.5s). Logging every repeat would bury the log in the same sentence.
+        internal static void HudOnly(string msg)
+        {
+            _hudNote = msg; _hudNoteUntil = Time.realtimeSinceStartup + 2.5f;
+        }
+
         // Per-frame logic, driven by Ticker.
         internal static void Tick()
         {

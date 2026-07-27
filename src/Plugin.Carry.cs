@@ -87,12 +87,11 @@ namespace PickUpMove
             if (block is Storage_Small sBusy && sBusy.IsOpen)
             { NoteHud(Loc.T("r_busy")); return; }
 
-            // FAIRNESS (host only): someone's request is already in the queue, waiting for us. The
-            // pipeline is single-slot, so if we start another carry now, that request waits out our
-            // aiming too - and the player who sent it has no way to know or hurry us. Let the queue
-            // through first; it drains one per frame, so this is a blink unless a move is verifying.
-            if (Raft_Network.IsHost && QueuedRequestCount > 0)
-            { NoteHud(Loc.T("yield")); return; }
+            // (No fairness gate here. It cannot fire: PollMoveRequests drains the queue at
+            // Plugin.cs:184, BEFORE the M key is read at :210, and if any blocker is set the M press
+            // is answered with 'busy' at :218 and never reaches this method - so by the time we get
+            // here the queue is empty by construction. Fairness lives where the queue actually
+            // waits: while the host CARRIES, see PollMoveRequests.)
 
             // CLAIM: someone else is carrying this block right now - one M per block, no exceptions.
             // (host checks the authoritative table, a client checks its mirror; the in-flight race

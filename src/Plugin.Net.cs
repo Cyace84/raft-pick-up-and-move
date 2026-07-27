@@ -269,10 +269,15 @@ namespace PickUpMove
         }
 
         private sealed class MoveReq { public byte[] Buf; public Steamworks.CSteamID Sender; public float RecvTime; public uint Idx; }
+
+        // Last whole second shown in the 'someone is waiting' HUD note, and the wall-clock stamp of
+        // the last queue heartbeat line. Both exist to keep those two out of frame-count territory.
+        private static int _yieldNoteSecs = -1;
+        private static float _queueNoteAt;
         private static readonly Queue<MoveReq> _moveReqQueue = new Queue<MoveReq>();
         // Must stay comfortably under the requester's post-ack failsafe (_cmDeadlineTime, 45s).
         private const float QueueCapSeconds = 30f;
-        /// <summary>Client move requests waiting on us right now (host side). Drives the fairness gate.</summary>
+        /// <summary>Client move requests waiting on us right now (host side). Read by the live eval channel.</summary>
         internal static int QueuedRequestCount { get { return _moveReqQueue.Count; } }
         // idx -> realtime of that block's last committed move (teleport keeps the index alive, so a
         // stale queued request could re-move it; recreate is covered by the zombie gate as well).
@@ -626,9 +631,9 @@ namespace PickUpMove
             // anyway - the split brain that made zombie chests. The client cancels on give-up now
             // (see PollClientMove), so this is belt AND braces: anything that has waited longer than
             // the cap gets a real answer instead of a place in line.
+            float now = Time.realtimeSinceStartup;
             if (_moveReqQueue.Count > 0)
             {
-                float now = Time.realtimeSinceStartup;
                 int capped = 0;
                 int n = _moveReqQueue.Count;
                 for (int i = 0; i < n; i++)
@@ -648,9 +653,40 @@ namespace PickUpMove
                 HandleMoveRequest(req);
                 break;
             }
-            // Moving is no longer part of this: a carry now flushes the queue instead of holding it.
-            if ((_hostVerifying || _tpVerifying || _reqScan != null) && _moveReqQueue.Count > 0 && Time.frameCount % 300 == 0)
-                Note($"[t] {_moveReqQueue.Count} move request(s) queued behind the current move");
+            // FAIRNESS. This is the only place where the wait is long enough to be unfair: a carry
+            // lasts as long as a human aims, and the queue is held for all of it. The player who is
+            // waiting has no way to hurry us and we have no way to know they exist - so say it on
+            // screen, repeatedly (the HUD note lives 2.5s), for as long as we hold the block. The
+            // 30s cap above is the guarantee; this is the courtesy that usually makes it moot.
+            if (_moveReqQueue.Count > 0)
+            {
+                float age = now - _moveReqQueue.Peek().RecvTime;
+
+                // With a seconds counter, not a static sentence: a line that never changes for ten
+                // seconds reads as a stuck HUD rather than a live one, and the number also tells the
+                // host how close this request is to the 30s cap that will refuse it.
+                //
+                // Driven by the DISPLAYED VALUE, not by a frame count. A '% 30' refresh is one frame
+                // in thirty, which is 0.5s at 60fps but 1.2s at 25fps - and any gap above one second
+                // makes the counter SKIP integers (1, 3, 4, 6), which is exactly how a clock stops
+                // looking like a clock. Re-pushing whenever the ceil changes ties it to the wall
+                // clock instead, so it steps once per second at any frame rate.
+                if (Moving != null)
+                {
+                    int secs = Mathf.CeilToInt(age);
+                    if (secs != _yieldNoteSecs) { _yieldNoteSecs = secs; HudOnly(string.Format(Loc.T("yield"), secs)); }
+                }
+
+                // The age goes in the log too, so the HUD counter can be checked against something
+                // rather than against an impression of how fast it ticked. Also wall-clock: the same
+                // fps dependency made these lines land 6s apart while claiming to be a 5s heartbeat.
+                if (now - _queueNoteAt >= 5f)
+                {
+                    _queueNoteAt = now;
+                    Note($"[t] {_moveReqQueue.Count} move request(s) queued behind {(Moving != null ? "the host's carry" : "the current move")}, oldest {age:F1}s");
+                }
+            }
+            else _yieldNoteSecs = -1;
         }
 
         // HOST: a client asked us to move a block. Capture its authoritative state and run the SAME
