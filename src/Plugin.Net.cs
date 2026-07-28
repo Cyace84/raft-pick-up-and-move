@@ -58,6 +58,7 @@ namespace PickUpMove
         private static string _hostText;
         private static RGD_Block _hostRgd;
         private static int _hostVerifyStart;
+        private static int? _hostCell;   // consolidator handle held for the length of the verify
         private static float _hostVerifyDeadlineTime; // wall-clock, not frames: frame deadlines scale
         // with fps, and slow settlers (recycler, ~4s) landed exactly on the old 120-frame cutoff.
         private static int _hostLastLoggedStable; // -1 unknown, 0 false, 1 true (log only on change)
@@ -929,6 +930,9 @@ namespace PickUpMove
             _hostNb = nb; _hostOriginal = original; _hostSlots = slots;
             _hostText = text; _hostRgd = rgd; _hostPaint = paint;
             _hostReqSender = sender; _hostReqRecvTime = recvTime;
+            // Same consolidator trap as the teleport branch: the freshly placed block reads unstable
+            // forever if its cell's real colliders are consolidated away (host standing elsewhere).
+            _hostCell = nb != null ? TempActivateCell(nb.transform.position) : null;
             _hostVerifyStart = Time.frameCount;
             _hostVerifyDeadlineTime = Time.realtimeSinceStartup + 6f; // wall-clock; slow settlers (recycler ~4s) fit
             _hostLastLoggedStable = -1;
@@ -968,6 +972,7 @@ namespace PickUpMove
             _claims.Clear(); _claimMirror.Clear(); _carryClaimIdx = 0;
 
             // teleport
+            ReleaseCell(ref _tpCell);
             _tpBlock = null; _tpVerifying = false; _tpReqSender = default;
             _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
             _tpSends.Clear();
@@ -985,6 +990,7 @@ namespace PickUpMove
         // a field that survives here leaks into the next move's verify.
         private static void ResetHostVerify()
         {
+            ReleaseCell(ref _hostCell);
             _hostVerifying = false; _hostNb = null; _hostOriginal = null; _hostSlots = null;
             _hostText = null; _hostRgd = null; _hostPaint = default; _hostReqSender = default;
             _hostBaseVerified = false; _hostDepsMoved = false; _hostRestoreWait = null;

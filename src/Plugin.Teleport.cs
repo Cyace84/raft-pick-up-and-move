@@ -25,6 +25,8 @@ namespace PickUpMove
         private static bool _tpVerifying;
         private static int _tpVerifyStart;
         private static float _tpVerifyDeadlineTime;
+        // Consolidator handle for the DESTINATION cell, held for the length of the verify.
+        private static int? _tpCell;
         private static Steamworks.CSteamID _tpReqSender;
         private sealed class TpSend { public Steamworks.CSteamID To; public byte[] Payload; public float Next; public int Left; }
         private static readonly List<TpSend> _tpSends = new List<TpSend>();
@@ -286,14 +288,42 @@ namespace PickUpMove
             Physics.SyncTransforms();
             RefreshWires(b);
             foreach (var d in _tpDeps) RefreshWires(d);
+            // DESTINATION CELL. Raft consolidates block colliders into one baked mesh per 8m cell and
+            // keeps the real BoxColliders DISABLED except near the local player or under a ref-counted
+            // temp activation (BlockCollisionConsolidator.TempActivateCellAndNeighbours). IsStable()
+            // asks the support gizmo to overlap a MASK_Block collider, so at a destination whose cell
+            // is consolidated it finds nothing and reads unstable forever - observed 07-27 as a flaky
+            // 'no support' refusal on spots that worked minutes later, whenever the host was away from
+            // the raft. The dep scan only activates the SOURCE cell and drops it before we run.
+            _tpCell = TempActivateCell(b.transform.position);
             _tpVerifyStart = Time.frameCount;
             _tpVerifyDeadlineTime = Time.realtimeSinceStartup + 6f;
             _tpVerifying = true;
         }
 
+        // Ref-counted temp activation of the consolidator cell around a WORLD position (the API takes
+        // world space and inverse-transforms it itself). Null when the consolidator is missing.
+        internal static int? TempActivateCell(Vector3 worldPos)
+        {
+            try
+            {
+                var cons = ComponentManager<BlockCollisionConsolidator>.Value;
+                if (cons != null) return cons.TempActivateCellAndNeighbours(worldPos);
+            }
+            catch { }
+            return null;
+        }
+
+        internal static void ReleaseCell(ref int? cell)
+        {
+            if (!cell.HasValue) return;
+            try { ComponentManager<BlockCollisionConsolidator>.Value?.RemoveTempActivate(cell.Value); } catch { }
+            cell = null;
+        }
+
         private static void PollTeleportVerify()
         {
-            if (_tpBlock == null) { _tpVerifying = false; _tpDeps.Clear(); _tpReqSender = default; return; }
+            if (_tpBlock == null) { ReleaseCell(ref _tpCell); _tpVerifying = false; _tpDeps.Clear(); _tpReqSender = default; return; }
             bool stable = false;
             try { stable = _tpBlock.IsStable(); } catch { }
             if (stable)
@@ -312,6 +342,7 @@ namespace PickUpMove
                 foreach (var d in _tpDeps) if (d != null) BroadcastTeleport(d);
                 Note($"moved to {_tpBlock.transform.localPosition.ToString("F2")} (+{delta}f, teleport)"
                     + (_tpDeps.Count > 0 ? $"; carried {_tpDeps.Count} on top" : ""));
+                ReleaseCell(ref _tpCell);
                 _tpBlock = null; _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
                 _tpVerifying = false; _tpReqSender = default;
                 return;
@@ -335,6 +366,7 @@ namespace PickUpMove
                 foreach (var d in _tpDeps) RefreshWires(d);
                 NoteHud(Loc.T("no_support"));
                 if (_tpReqSender.IsValid()) SendMoveRefusal(_tpReqSender, _tpBlock.ObjectIndex, "no_support");
+                ReleaseCell(ref _tpCell);
                 _tpBlock = null; _tpDeps.Clear(); _tpDepsOldPos.Clear(); _tpDepsOldRot.Clear();
                 _tpVerifying = false; _tpReqSender = default;
             }
