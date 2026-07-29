@@ -12,20 +12,20 @@ it one tile over.
 
 - Storage of any size, items still inside.
 - Cooking pot, grill, juicer, smelter, purifier: recipe, progress and slots survive.
-- Crop plots take the plants and their growth stage; beehives keep the combs.
-- Battery chargers, biofuel refiners and fuel tanks keep whatever's in them.
+- Crop plots take the plants with them, at whatever growth stage they were in.
+- Beehives arrive with the combs still in them.
+- Battery chargers, biofuel refiners, fuel tanks: nothing drains out on the way.
 - Pipes rewire themselves around the new spot.
-- The receiver keeps its frequency; antennas move on their own, wire and all.
+- The receiver remembers its frequency; antennas move on their own, wire and all.
 - Sprinklers keep their water and battery.
 - Sails, steering wheels, engines and anchors move without a rebuild.
-- Signs keep their text.
+- Whatever you wrote on a sign is still on it.
 - Decor, furniture, lights; paint stays on. Anything standing on top is carried along, and the
   placement ghost previews the whole group (live contents like batteries and purifier water
   included), tinted vanilla green/red.
 
 One exception: the detail plank, whose stretch mechanic doesn't survive a move. If a move can't
 go through, a short note at the top of the screen tells you why, in your game's language.
-Nothing is ever silently dropped.
 
 ## Install
 
@@ -52,7 +52,7 @@ after a reload). For a clean co-op game, have everyone run the mod.
 
 One source tree builds for both loaders. Reference paths default to a stock Windows Steam install;
 anywhere else (Proton/Wine/CrossOver, other Steam library) copy `Local.props.example` to
-`Local.props` and set `GameDir` / `RmlRoot` — it is gitignored, so machine paths never land in the
+`Local.props` and set `GameDir` / `RmlRoot`. It is gitignored, so machine paths never land in the
 repo. A wrong path fails with one readable sentence, not a wall of CS0246.
 
 ```bash
@@ -69,7 +69,7 @@ Everything can also be set per-invocation: `dotnet build -c Release -p:GameDir="
 
 The `.rmod` ships **sources** (RML compiles mods at load time), so `pack-rmod.sh` is what produces
 the shipped artifact. `rml/PickUpMove.Rml.csproj` compiles that same file set against RML's own
-assemblies purely to catch errors at the desk instead of at a game launch — it builds nothing that
+assemblies purely to catch errors at the desk instead of at a game launch, and it builds nothing that
 ships. Both builds embed the git short SHA (`gen-stamp.sh`) and log it at startup, so the running
 build is always identifiable; commit before building if you want a clean stamp.
 

@@ -4,8 +4,8 @@
 
 **Runs on Raft Mod Loader.** The mod now ships for both loaders from one source tree: the
 BepInEx plugin as before, and a `.rmod` for RML. Features, settings and behaviour are the same on
-either one, so use whichever loader you already have. Multiplayer across the two is fine. What
-matters is that the person doing the moving has the mod, not which loader they run it under.
+either one, so use whichever loader you already have. Multiplayer across the two is fine, as long
+as the player doing the moving has the mod.
 
 **Co-op: one player moving no longer freezes another.** The host applies moves one at a time, so
 while somebody is carrying a block, everyone else's move waits its turn. That wait used to be
@@ -26,6 +26,6 @@ touching the same code can take this one down with it.
 
 ## 1.0.0
 
-First release. Move a placed object without emptying it first. Chests keep their contents,
-smelters keep the bar they were halfway through, devices keep their battery, signs keep their
-text and paint.
+First release. Move a placed object without emptying it first. Chests arrive with their contents,
+a smelter carries on with the bar it was halfway through, powered devices hold on to the battery,
+and paint and sign text survive the trip.
