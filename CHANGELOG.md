@@ -12,7 +12,9 @@ Your block now stays exactly where it is until the host really moves it, so noth
 while you wait. If the answer doesn't come back within half a second you're told the mod is
 waiting on the host, and the host gets a line on screen saying somebody's move is waiting and for
 how long. A request that has waited thirty seconds is answered rather than left hanging: you're
-told the host is busy, and your block stays put.
+told the host is busy, and your block stays put. If somebody takes the spot while a move waits its
+turn, the host now refuses that move and says why, rather than putting two things in one
+place.
 
 **The storage hint no longer patches the game.** The "M Move" line over a chest used to come from
 a patch on the game's own look-at code. It now comes from the same check that draws the hint for
