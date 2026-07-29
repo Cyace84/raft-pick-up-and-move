@@ -17,10 +17,13 @@ namespace PickUpMove
     //     left-click. Vanilla cannot double-place the chest because the storage item is not in the
     //     player's inventory while it is being carried.
     //   * ZERO Harmony patches on game methods. The storage 'Move' hint used to be a postfix on
-    //     Storage_Small.OnIsRayed, but under RML (mid-session load into a live process via CrossOver/
-    //     Rosetta) patching a HOT method can yield a broken replacement that spuriously NREs every
-    //     hovered frame with its own exception handling dead (recon/storage-onisrayed.*, sessions
-    //     A/B/C 2026-07-25). All hints now come from our LateTick raycast - plain compiled code.
+    //     Storage_Small.OnIsRayed. It was dropped because on SOME boots of this dev setup (Raft under
+    //     Wine/CrossOver on macOS) every Harmony-replaced method executes broken: it NREs once per
+    //     call with its own exception handling dead. RML's own patch targets were hit the same way in
+    //     a modless session, so this is the runtime here, not the loader (recon/storage-onisrayed.*,
+    //     sessions A/B/C 2026-07-25; the 'hot method' explanation was tested and retracted).
+    //     Unverified on native Windows - nobody here has one. All hints now come from our LateTick
+    //     raycast, plain compiled code, which cannot be affected either way.
     //   * The same layout is what makes the mod portable: nothing that matters hangs off the host
     //     component, so swapping BepInEx for the Raft Mod Loader is a matter of swapping one file.
     //

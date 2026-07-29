@@ -66,12 +66,12 @@ namespace PickUpMove
             else { movable = IsMovable(block); _hintLastBlock = block; _hintLastMovable = movable; }
             if (!movable) { ClearHintIfShown(); return; }
 
-            // Storages included since b217526+: the 'Move' line used to come from a Harmony postfix
-            // on Storage_Small.OnIsRayed, but under RML mid-session loads the Harmony replacement of a
-            // HOT method can come out broken (CrossOver/Rosetta stale-translation roulette - see
-            // recon/storage-onisrayed.*): the patched copy spuriously NREs every hovered frame and its
-            // own finalizer never runs. This LateTick path is statically compiled code - immune - and
-            // it even shows the hint in sick sessions where vanilla's own 'Open' prompt is broken.
+            // Storages included since b217526+: the 'Move' line used to come from a Harmony postfix on
+            // Storage_Small.OnIsRayed. Dropped because on some boots of this dev setup (Wine/CrossOver)
+            // Harmony-replaced methods execute broken - the patched copy NREs every hovered frame and
+            // its own finalizer never runs (recon/storage-onisrayed.*). This LateTick path is plain
+            // compiled code, so it keeps working in those sessions even when vanilla's own 'Open'
+            // prompt is broken.
             // When the storage UI is open, ActiveMenu != None already cleared us above; IsOpen guards
             // the one-frame gap during the open transition.
             if (block is Storage_Small st && st.IsOpen) { ClearHintIfShown(); return; }
