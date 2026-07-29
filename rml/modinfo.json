@@ -1,6 +1,6 @@
 {
   "name": "Pick Up & Move",
-  "slug": "pickupmove",
+  "slug": "pick-up-and-move",
   "author": "Cyace84",
   "description": "Move a placed object without emptying it first. Aim at it, press a key, and the normal build ghost follows your cursor until you click it down somewhere else. Chests keep their contents, smelters keep the bar they were halfway through, devices keep their battery, signs keep their text and paint. Works in single player and in multiplayer, where only the player doing the moving needs the mod.",
   "version": "1.1.0",
@@ -9,7 +9,7 @@
   "icon": "icon.jpg",
   "banner": "banner.jpg",
   "gameVersion": "1.1.01",
-  "updateUrl": "https://www.raftmodding.com/api/v1/mods/pickupmove/version.txt",
+  "updateUrl": "https://www.raftmodding.com/api/v1/mods/pick-up-and-move/version.txt",
   "isModPermanent": false,
   "excludedFiles": []
 }
