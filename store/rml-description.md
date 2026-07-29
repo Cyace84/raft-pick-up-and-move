@@ -61,6 +61,11 @@ A player without the mod sees the new position after rejoining, since it's saved
 
 ## Bug reports
 
+This build is a port. The mod grew up as a BepInEx plugin, and the Raft Mod Loader version is
+the same code behind a different entry point, so most of my hours testing it are on the other
+side. Loading, the everyday moves and a co-op session are checked here, long play is not. If
+something behaves differently under RML, I want to hear about it.
+
 If something breaks I need the log.
 
 1. Open `mods/ModData/pickupmove/settings.txt` and set `relay=true`.
