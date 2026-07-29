@@ -41,7 +41,7 @@ Sometimes a move won't go through. When that happens, a short note at the top of
 you why, in your game's language.
 
 The move key and two logging switches live in a plain `settings.txt` inside
-`mods/ModData/pickupmove/`, written with defaults the first time you run the mod.
+`mods/ModData/pick-up-and-move/`, written with defaults the first time you run the mod.
 
 ## Multiplayer
 
@@ -68,7 +68,7 @@ something behaves differently under RML, I want to hear about it.
 
 If something breaks I need the log.
 
-1. Open `mods/ModData/pickupmove/settings.txt` and set `relay=true`.
+1. Open `mods/ModData/pick-up-and-move/settings.txt` and set `relay=true`.
 2. Reproduce the problem.
 3. Zip that folder and attach it to an issue on
    [the GitHub tracker](https://github.com/Cyace84/raft-pick-up-and-move/issues).

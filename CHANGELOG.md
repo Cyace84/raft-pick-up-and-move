@@ -2,11 +2,6 @@
 
 ## 1.1.0
 
-**Runs on Raft Mod Loader.** The mod now ships for both loaders from one source tree: the
-BepInEx plugin as before, and a `.rmod` for RML. Features, settings and behaviour are the same on
-either one, so use whichever loader you already have. Multiplayer across the two is fine, as long
-as the player doing the moving has the mod.
-
 **Co-op: one player moving no longer freezes another.** The host applies moves one at a time, so
 while somebody is carrying a block, everyone else's move waits its turn. That wait used to be
 both invisible and unbounded. Your block left the world the moment you asked for it, and then
@@ -23,6 +18,11 @@ told the host is busy, and your block stays put.
 a patch on the game's own look-at code. It now comes from the same check that draws the hint for
 every other object, so the mod patches no game method at all. One less place where another mod
 touching the same code can take this one down with it.
+
+**Runs on Raft Mod Loader.** The mod now ships for both loaders from one source tree: the
+BepInEx plugin as before, and a `.rmod` for RML. Features, settings and behaviour are the same on
+either one, so use whichever loader you already have. Multiplayer across the two is fine, as long
+as the player doing the moving has the mod.
 
 ## 1.0.0
 
