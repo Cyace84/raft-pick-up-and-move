@@ -23,8 +23,8 @@ cp src/*.cs "$STAGE/"                 # shared logic; src/hosts/ is a subfolder,
                                       # entry point is NOT picked up by this glob
 cp rml/Host.Rml.cs "$STAGE/"          # the RML entry point
 cp rml/modinfo.json "$STAGE/"
-cp media/pum_chest.jpg  "$STAGE/icon.jpg"
-cp media/banner_wide.png "$STAGE/banner.png"
+cp rml/icon.jpg   "$STAGE/"
+cp rml/banner.jpg "$STAGE/"
 
 # Guard: RML rejects an archive that does not contain exactly one Mod subclass, and a stray
 # BepInEx reference would fail the load-time compile with no assembly to bind against.

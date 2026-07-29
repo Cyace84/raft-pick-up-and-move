@@ -7,9 +7,9 @@
   "requiredByAllPlayers": false,
   "license": "MIT",
   "icon": "icon.jpg",
-  "banner": "banner.png",
+  "banner": "banner.jpg",
   "gameVersion": "1.1.01",
-  "updateUrl": "",
+  "updateUrl": "https://www.raftmodding.com/api/v1/mods/pickupmove/version.txt",
   "isModPermanent": false,
   "excludedFiles": []
 }
