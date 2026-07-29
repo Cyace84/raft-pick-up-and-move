@@ -48,6 +48,12 @@ The move key and two logging switches live in a plain `settings.txt` inside
 Works in co-op, as host or as a client. Anyone with the mod can move things, and moves show up live
 for every other player running it.
 
+Crossplay is not covered yet. The mod sends its own messages over Steam, so on a crossplay
+world a player who joined from another store stays out of the loop: their own moves get no
+answer and the block stays where it was, and other people's moves reach them the same way
+they reach somebody without the mod. Steam lobbies and solo play are unaffected. The fix is
+to move onto the game's own message path, which is on my list.
+
 Only one player at a time can be carrying a given object. If two players press the key on the same
 chest at once, the first one gets it and the second sees a short note. There is no way to steal a
 carried object or to duplicate it in the process.

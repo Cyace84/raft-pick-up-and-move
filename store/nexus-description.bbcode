@@ -34,6 +34,8 @@ Change the key in [font=Courier New]BepInEx/config/com.cyace84.pickupmove.cfg[/f
 [size=4][b]Multiplayer[/b][/size]
 Works in co-op, as host or as a client. Anyone with the mod can move things, and moves show up live for every other player running the mod.
 
+Crossplay is not covered yet. The mod sends its own messages over Steam, so on a crossplay world a player who joined from another store stays out of the loop: their own moves get no answer and the block stays where it was, and other people's moves reach them the same way they reach somebody without the mod. Steam lobbies and solo play are unaffected. The fix is to move onto the game's own message path, which is on my list.
+
 Only one player at a time can be carrying a given object. If you and another player press the key on the same chest at once, the first one gets it and the second sees a short "someone else is moving this" note. Same rule if you try to grab something a teammate is already carrying, no way to steal it or duplicate it in the process.
 
 The host applies moves one at a time. If the host happens to be carrying a block when you start your move, yours waits its turn: your object stays visible where it is, a note tells you the mod is waiting on the host, and it goes through the moment the host puts theirs down. The host meanwhile sees how long you have been waiting.
